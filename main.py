@@ -1,5 +1,3 @@
-"""Underwater Vision AI - Step 14: accuracy reporting and research charts."""
-
 import sys
 import csv
 import json
@@ -1750,6 +1748,288 @@ class UnderwaterTrainingDialog(QDialog):
 
 
 # ============================================================================
+# Step 15 — Controlled training experiments (separate from Step 11 practice).
+# Uses TRAIN and VAL only. Never uses TEST for selecting the model.
+# Each run has a fresh output folder and a reproducibility manifest.
+# ============================================================================
+
+class ResearchTrainingWorker(QThread):
+    progress = Signal(int, int, str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, dataset_yaml, epochs, batch, image_size, patience,
+                 seed, device_choice, parent=None):
+        super().__init__(parent)
+        self.dataset_yaml = str(Path(dataset_yaml).resolve())
+        self.epochs = epochs
+        self.batch = batch
+        self.image_size = image_size
+        self.patience = patience
+        self.seed = seed
+        self.device_choice = device_choice
+
+    def run(self):
+        try:
+            import yaml
+            import ultralytics
+            import torch
+
+            with open(self.dataset_yaml, encoding='utf-8') as file:
+                data = yaml.safe_load(file)
+            if not isinstance(data, dict):
+                raise ValueError('The dataset YAML must describe a dataset.')
+            names = dataset_class_names(data.get('names'))
+            split_counts = {}
+            for split in ('train', 'val'):
+                folder = locate_dataset_split(self.dataset_yaml, data, split)
+                images = [p for p in folder.rglob('*')
+                          if p.is_file() and p.suffix.lower() in DATASET_IMAGE_SUFFIXES]
+                if not images:
+                    raise ValueError(f'{split} folder does not contain images.')
+                split_counts[split] = len(images)
+            if self.device_choice == 'NVIDIA GPU (CUDA:0)' and not torch.cuda.is_available():
+                raise ValueError('CUDA GPU not available. Choose Automatic or CPU.')
+            if self.device_choice == 'Apple Silicon (MPS)' and not torch.backends.mps.is_available():
+                raise ValueError('Apple MPS not available. Choose Automatic or CPU.')
+
+            starting_model = 'yolo26n.pt'
+            model = YOLO(starting_model)
+            self.progress.emit(0, self.epochs, 'Preparing a new training experiment...')
+
+            def epoch_finished(trainer):
+                epoch = min(int(trainer.epoch) + 1, self.epochs)
+                self.progress.emit(epoch, self.epochs,
+                                   f'Epoch {epoch}/{self.epochs} completed (early stopping may finish sooner)')
+
+            model.add_callback('on_fit_epoch_end', epoch_finished)
+            output_root = Path(self.dataset_yaml).parent / 'training_runs'
+            options = {
+                'data': self.dataset_yaml,
+                'epochs': self.epochs,
+                'batch': self.batch,
+                'imgsz': self.image_size,
+                'patience': self.patience,
+                'seed': self.seed,
+                'deterministic': True,
+                'workers': 0,  # Compatible with Windows Qt application process.
+                'project': str(output_root),
+                'name': 'step15_research',
+                'exist_ok': False,
+                'plots': True,
+                'save': True,
+                'verbose': True,
+            }
+            if self.device_choice != 'Automatic':
+                options['device'] = {'CPU': 'cpu', 'NVIDIA GPU (CUDA:0)': 0,
+                                     'Apple Silicon (MPS)': 'mps'}[self.device_choice]
+            self.progress.emit(0, self.epochs, 'Training started. Detailed log is in the terminal.')
+            model.train(**options)
+            trainer = model.trainer
+            if trainer is None:
+                raise RuntimeError('Training did not produce a trainer instance.')
+            run_dir = Path(trainer.save_dir).resolve()
+            best = run_dir / 'weights' / 'best.pt'
+            if not best.is_file():
+                raise RuntimeError('Training stopped without creating best.pt. Check terminal output.')
+            actual_epochs = int(trainer.epoch) + 1
+            manifest = {
+                'step': 15,
+                'purpose': 'Validation-based model training, never test-set tuning',
+                'dataset_yaml': self.dataset_yaml,
+                'dataset_image_counts': split_counts,
+                'class_names': names,
+                'starting_weights': starting_model,
+                'epochs_requested': self.epochs,
+                'epochs_completed': actual_epochs,
+                'early_stopping_patience': self.patience,
+                'batch_size': self.batch,
+                'image_size': self.image_size,
+                'seed': self.seed,
+                'deterministic_requested': True,
+                'device_selection': self.device_choice,
+                'ultralytics_version': ultralytics.__version__,
+                'torch_version': torch.__version__,
+                'cuda_available': torch.cuda.is_available(),
+                'best_checkpoint': str(best),
+                'training_results_csv': str(run_dir / 'results.csv'),
+                'note': 'GPU algorithms may still be nondeterministic; test split not used here.',
+            }
+            with (run_dir / 'step15_experiment.json').open('w', encoding='utf-8') as file:
+                json.dump(manifest, file, indent=2, ensure_ascii=False)
+            self.completed.emit({
+                'run_dir': str(run_dir),
+                'best_path': str(best),
+                'dataset_yaml': self.dataset_yaml,
+                'epochs_completed': actual_epochs,
+                'epochs_requested': self.epochs,
+                'manifest': str(run_dir / 'step15_experiment.json'),
+                'results_csv': str(run_dir / 'results.csv'),
+            })
+        except Exception as exc:
+            self.failed.emit(f'{type(exc).__name__}: {exc}')
+
+
+class ResearchTrainingDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Step 15 — Improve Your Underwater Model')
+        self.resize(780, 560)
+        self.worker = None
+        self.last_result = None
+        layout = QVBoxLayout(self)
+        explanation = QLabel(
+            'This is a careful training experiment, not just a 10-epoch practice run. '
+            'We train on TRAIN images, choose the best checkpoint using VAL, '
+            'and keep TEST for final unbiased evaluation.'
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+
+        dataset_row = QHBoxLayout()
+        self.yaml_field = QLineEdit()
+        self.yaml_field.setPlaceholderText('Select the Aquarium data.yaml')
+        dataset_row.addWidget(self.yaml_field)
+        browse = QPushButton('Choose data.yaml')
+        browse.clicked.connect(self.choose_yaml)
+        dataset_row.addWidget(browse)
+        layout.addLayout(dataset_row)
+
+        form = QGridLayout()
+        form.addWidget(QLabel('Starting model:'), 0, 0)
+        form.addWidget(QLabel('yolo26n.pt (same baseline for every training run)'), 0, 1)
+        form.addWidget(QLabel('Maximum epochs:'), 1, 0)
+        self.epochs_box = QSpinBox()
+        self.epochs_box.setRange(1, 300)
+        self.epochs_box.setValue(50)
+        self.epochs_box.setToolTip('An epoch is one pass over the training set. Training may stop early.')
+        form.addWidget(self.epochs_box, 1, 1)
+        form.addWidget(QLabel('Early-stopping patience:'), 2, 0)
+        self.patience_box = QSpinBox()
+        self.patience_box.setRange(1, 100)
+        self.patience_box.setValue(12)
+        self.patience_box.setToolTip('Stop after this many epochs without validation improvement.')
+        form.addWidget(self.patience_box, 2, 1)
+        form.addWidget(QLabel('Batch size:'), 3, 0)
+        self.batch_box = QSpinBox()
+        self.batch_box.setRange(1, 32)
+        self.batch_box.setValue(4)
+        form.addWidget(self.batch_box, 3, 1)
+        form.addWidget(QLabel('Image resolution:'), 4, 0)
+        self.size_box = QComboBox()
+        self.size_box.addItems(['640', '416', '320'])
+        form.addWidget(self.size_box, 4, 1)
+        form.addWidget(QLabel('Random seed:'), 5, 0)
+        self.seed_box = QSpinBox()
+        self.seed_box.setRange(0, 999999)
+        self.seed_box.setValue(42)
+        self.seed_box.setToolTip('Controls many sources of randomness for a more repeatable experiment.')
+        form.addWidget(self.seed_box, 5, 1)
+        form.addWidget(QLabel('Hardware:'), 6, 0)
+        self.device_box = QComboBox()
+        self.device_box.addItems(['Automatic', 'CPU', 'NVIDIA GPU (CUDA:0)',
+                                  'Apple Silicon (MPS)'])
+        form.addWidget(self.device_box, 6, 1)
+        layout.addLayout(form)
+
+        warning = QLabel(
+            'Suggested first research run: 50 epochs maximum, patience 12, batch 4, '
+            'image size 640, seed 42. Training may take a long time on a CPU. '
+            'Keep this window open until it finishes. Do not use your TEST images '
+            'to select training settings.'
+        )
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+        self.start_button = QPushButton('Start Step 15 Training')
+        self.start_button.clicked.connect(self.start_training)
+        layout.addWidget(self.start_button)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        layout.addWidget(self.progress_bar)
+        self.status_label = QLabel('Ready. Choose a dataset to begin.')
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        self.result_label = QLabel('When finished, your best.pt and experiment record will appear here.')
+        self.result_label.setWordWrap(True)
+        self.result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.result_label)
+        self.evaluate_button = QPushButton('Evaluate Trained Model (Step 9)')
+        self.evaluate_button.setEnabled(False)
+        self.evaluate_button.clicked.connect(self.open_evaluation)
+        layout.addWidget(self.evaluate_button)
+        layout.addStretch()
+
+    def choose_yaml(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Choose your underwater dataset', '', 'Dataset YAML (*.yaml *.yml)')
+        if path:
+            self.yaml_field.setText(path)
+
+    def start_training(self):
+        path = Path(self.yaml_field.text().strip().strip('"'))
+        if not path.is_file():
+            QMessageBox.warning(self, 'Dataset missing', 'First choose an existing data.yaml file.')
+            return
+        if self.worker is not None and self.worker.isRunning():
+            return
+        self.last_result = None
+        self.start_button.setEnabled(False)
+        self.evaluate_button.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.status_label.setText('Checking dataset and loading the YOLO model...')
+        self.result_label.setText('Training is in progress. See terminal for detailed logs.')
+        self.worker = ResearchTrainingWorker(
+            path, self.epochs_box.value(), self.batch_box.value(),
+            int(self.size_box.currentText()), self.patience_box.value(),
+            self.seed_box.value(), self.device_box.currentText(), self)
+        self.worker.progress.connect(self.show_progress)
+        self.worker.completed.connect(self.completed_training)
+        self.worker.failed.connect(self.failed_training)
+        self.worker.finished.connect(self.training_finished)
+        self.worker.start()
+
+    def show_progress(self, epoch, total, message):
+        self.progress_bar.setValue(round(100 * epoch / max(total, 1)))
+        self.status_label.setText(message)
+
+    def completed_training(self, result):
+        self.last_result = result
+        self.progress_bar.setValue(100)
+        self.status_label.setText(
+            f"Training completed ({result['epochs_completed']} epochs, "
+            f"requested maximum {result['epochs_requested']}).")
+        self.result_label.setText(
+            f"Your new model:\n{result['best_path']}\n\n"
+            f"Experiment settings:\n{result['manifest']}\n\n"
+            f"Training history:\n{result['results_csv']}")
+        self.evaluate_button.setEnabled(True)
+
+    def failed_training(self, message):
+        self.status_label.setText('Training failed. Previous best.pt files remain unchanged.')
+        self.result_label.setText(message)
+        QMessageBox.critical(self, 'Step 15 Training Error', message)
+
+    def training_finished(self):
+        self.start_button.setEnabled(True)
+
+    def open_evaluation(self):
+        if not self.last_result:
+            return
+        dlg = GroundTruthEvaluationDialog(self)
+        dlg.yaml_edit.setText(self.last_result['dataset_yaml'])
+        dlg.weights_edit.setText(self.last_result['best_path'])
+        dlg.exec()
+
+    def closeEvent(self, event):
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, 'Training active',
+                                    'Leave this dialog open while training is running.')
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+
+# ============================================================================
 # Step 13: evaluate the SAME trained model against the SAME labeled test
 # images after each image transformation. Only images are modified; ground
 # truth labels are copied without changing their box coordinates.
@@ -2394,6 +2674,10 @@ class UnderwaterApp(QMainWindow):
         self.accuracy_report_button.clicked.connect(self.open_accuracy_report)
         main_layout.addWidget(self.accuracy_report_button)
 
+        self.research_train_button = QPushButton('Step 15: Improve Model Training')
+        self.research_train_button.clicked.connect(self.open_research_training)
+        main_layout.addWidget(self.research_train_button)
+
         # The enhancement slider controls the selected image-processing algorithm.
         enhancement_controls = QHBoxLayout()
         self.setting_label = QLabel("CLAHE clip limit: 2.0")
@@ -2512,6 +2796,10 @@ class UnderwaterApp(QMainWindow):
             report.exec()
         except Exception as error:
             QMessageBox.critical(self, 'Invalid accuracy CSV', str(error))
+
+    def open_research_training(self):
+        dialog = ResearchTrainingDialog(self)
+        dialog.exec()
 
     def open_underwater_training(self):
         dialog = UnderwaterTrainingDialog(self)
