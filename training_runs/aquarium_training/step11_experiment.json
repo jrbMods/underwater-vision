@@ -1,0 +1,19 @@
+{
+  "dataset_yaml": "C:/Users/Jerry/Desktop/underwater-vision-thesis/data.yaml",
+  "starting_weights": "yolo26n.pt",
+  "epochs_requested": 10,
+  "batch_size": 4,
+  "image_size": 640,
+  "device_selection": "Automatic",
+  "class_names": {
+    "0": "fish",
+    "1": "jellyfish",
+    "2": "penguin",
+    "3": "puffin",
+    "4": "shark",
+    "5": "starfish",
+    "6": "stingray"
+  },
+  "best_checkpoint": "C:\\Users\\Jerry\\Desktop\\underwater-vision-thesis\\training_runs\\aquarium_training\\weights\\best.pt",
+  "last_checkpoint": "C:\\Users\\Jerry\\Desktop\\underwater-vision-thesis\\training_runs\\aquarium_training\\weights\\last.pt"
+}
