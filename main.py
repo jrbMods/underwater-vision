@@ -1,4 +1,8 @@
 import sys
+import subprocess
+import logging
+import threading
+import traceback
 import csv
 import json
 import shutil
@@ -9,7 +13,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QThread, Signal, QEvent
+from PySide6.QtCore import Qt, QThread, Signal, QEvent, QTimer, qInstallMessageHandler
 from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont, QKeySequence, QShortcut, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,6 +40,8 @@ from PySide6.QtWidgets import (
     QSplitter,
     QSizePolicy,
     QFrame,
+    QDialogButtonBox,
+    QPlainTextEdit,
 )
 from ultralytics import YOLO
 
@@ -44,10 +50,94 @@ PROJECT_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = PROJECT_DIR / "assets"
 PROFILE_FILE = PROJECT_DIR / "profile.json"
 
+# App output is saved here, and can be followed live from the header button.
+# This is deliberately separate from the user's images and training results.
+LOG_DIR = PROJECT_DIR / "logs"
+LOG_FILE = LOG_DIR / "ocean_studio.log"
+
+
+class TeeLogStream:
+    """Keep existing console output while saving Python stdout/stderr to a file."""
+
+    def __init__(self, original, logfile, lock):
+        self.original = original
+        self.logfile = logfile
+        self.lock = lock
+        self.encoding = getattr(original, "encoding", "utf-8") or "utf-8"
+
+    def write(self, text):
+        text = str(text)
+        with self.lock:
+            if self.original is not None:
+                try:
+                    self.original.write(text)
+                except (OSError, ValueError):
+                    pass
+            try:
+                self.logfile.write(text)
+                self.logfile.flush()
+            except (OSError, ValueError):
+                pass
+        return len(text)
+
+    def flush(self):
+        with self.lock:
+            if self.original is not None:
+                try:
+                    self.original.flush()
+                except (OSError, ValueError):
+                    pass
+            try:
+                self.logfile.flush()
+            except (OSError, ValueError):
+                pass
+
+    def isatty(self):
+        return False
+
+    def writable(self):
+        return True
+
+
+def initialize_logging():
+    """Capture Python prints, tracebacks and standard Python logging messages."""
+    global LOG_FILE
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        logfile = LOG_FILE.open("a", encoding="utf-8", buffering=1)
+    except OSError:
+        # Fallback for a project folder that is read-only.
+        LOG_FILE = Path.home() / "ocean_studio.log"
+        logfile = LOG_FILE.open("a", encoding="utf-8", buffering=1)
+
+    lock = threading.RLock()
+    sys.stdout = TeeLogStream(sys.stdout, logfile, lock)
+    sys.stderr = TeeLogStream(sys.stderr, logfile, lock)
+
+    # Package loggers such as Ultralytics use Python's logging module.
+    handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    logging.getLogger().addHandler(handler)
+    logging.getLogger("ultralytics").addHandler(handler)
+
+    def qt_message_handler(msg_type, context, message):
+        # Qt warnings sometimes bypass Python's sys.stderr.
+        try:
+            sys.stderr.write(f"[Qt {msg_type.name}] {message}\n")
+        except Exception:
+            pass
+
+    qInstallMessageHandler(qt_message_handler)
+    print("\n" + "=" * 68)
+    print("Ocean Studio started. Live application log:", LOG_FILE)
+    print("=" * 68, flush=True)
+
+
+
 
 def load_profile():
     defaults = {"first_name": "Your first name", "last_name": "Your surname",
-                "email": "", "fnumber": "",
+                "email": "", "fnum": "",
                 "university": "Your university", "program": "Master's thesis",
                 "project_title": "Underwater Vision AI"}
     if PROFILE_FILE.is_file():
@@ -75,9 +165,12 @@ def logo_pixmap(filename, width, height):
 
 def find_background_asset():
     """Return the first usable background image from the assets folder."""
+    # Fixed background: no in-app selector. Named background.* takes priority.
+    # Legacy background_custom.* remains supported so your existing photo
+    # does not disappear when you upgrade from the previous version.
     candidates = [
-        "background_custom.png", "background_custom.jpg", "background_custom.jpeg", "background_custom.webp",
         "background.png", "background.jpg", "background.jpeg", "background.webp",
+        "background_custom.png", "background_custom.jpg", "background_custom.jpeg", "background_custom.webp",
     ]
     for name in candidates:
         file = ASSETS_DIR / name
@@ -3501,10 +3594,10 @@ class UnderwaterApp(QMainWindow):
         brand_text.addWidget(subtitle)
         heading.addLayout(brand_text)
         heading.addStretch(1)
-        self.background_button = QPushButton("Set background")
-        self.background_button.setToolTip("Choose a background photo. It will appear softly blurred behind the interface.")
-        self.background_button.clicked.connect(self.choose_background_image)
-        heading.addWidget(self.background_button)
+        self.logs_button = QPushButton("Open terminal / logs")
+        self.logs_button.setToolTip("Open a live terminal showing Ocean Studio's application log")
+        self.logs_button.clicked.connect(self.open_application_logs)
+        heading.addWidget(self.logs_button)
         header_tag = QLabel("●  RESEARCH EDITION")
         header_tag.setObjectName("headerTag")
         heading.addWidget(header_tag)
@@ -3799,7 +3892,7 @@ class UnderwaterApp(QMainWindow):
             ("FIRST NAME", profile["first_name"]),
             ("SURNAME", profile["last_name"]),
             ("EMAIL", profile["email"] or "Not provided yet"),
-            ("FACULTY NUMBER", profile["fnumber"] or "Not provided yet"),
+            ("FACULTY NUMBER", profile["fnum"] or "Not provided yet"),
         )
         field_grid = QGridLayout()
         field_grid.setContentsMargins(0, 2, 0, 0)
@@ -3831,8 +3924,8 @@ class UnderwaterApp(QMainWindow):
         logo_layout = QHBoxLayout(logo_wrap)
         logo_layout.setContentsMargins(0, 0, 0, 0)
         logo_layout.setSpacing(12)
-        for filename, title in (("logo.png", "MY LOGO"),
-                                ("university_logo.png", "UNIVERSITY LOGO")):
+        for filename, title in (("logo.png", ""),
+                                ("university_logo.png", "")):
             card = QFrame()
             card.setObjectName("aboutLogoCard")
             card.setMinimumWidth(144)
@@ -3922,29 +4015,57 @@ class UnderwaterApp(QMainWindow):
         if hasattr(self, "content_root"):
             self.content_root.raise_()
 
-    def choose_background_image(self):
-        """Allow the user to choose a background photo without editing code."""
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Choose background image",
-            "",
-            "Images (*.png *.jpg *.jpeg *.webp)"
-        )
-        if not path:
-            return
-        try:
-            ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-            for old_name in ("background_custom.png", "background_custom.jpg", "background_custom.jpeg", "background_custom.webp"):
-                old_file = ASSETS_DIR / old_name
-                if old_file.exists():
-                    old_file.unlink()
-            suffix = Path(path).suffix.lower() or ".png"
-            target = ASSETS_DIR / f"background_custom{suffix}"
-            shutil.copyfile(path, target)
-            self.refresh_background()
-            self.status.setText("Custom background updated. The image is shown with a soft blur.")
-        except Exception as error:
-            QMessageBox.critical(self, "Background image error", str(error))
+    def open_application_logs(self):
+        """Open the live log in a Windows terminal (or an in-app fallback)."""
+        if sys.platform == "win32":
+            try:
+                # PowerShell follows new lines in the log while the app runs.
+                # Use argument-list invocation, not shell=True, so spaces in
+                # project paths (and user-selected folder names) are safe.
+                escaped_path = str(LOG_FILE).replace("'", "''")
+                command = (
+                    "$Host.UI.RawUI.WindowTitle = 'Ocean Studio - Live Logs'; "
+                    "Write-Host 'OCEAN STUDIO / LIVE LOGS' -ForegroundColor Cyan; "
+                    f"Write-Host 'File: {escaped_path}' -ForegroundColor DarkGray; "
+                    f"Get-Content -LiteralPath '{escaped_path}' -Tail 100 -Wait"
+                )
+                subprocess.Popen(
+                    ["powershell.exe", "-NoProfile", "-NoLogo", "-Command", command],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    cwd=str(PROJECT_DIR),
+                )
+                self.status.setText("Live application logs opened in a separate terminal window.")
+                return
+            except (OSError, ValueError) as error:
+                print(f"Could not open PowerShell terminal: {error}", file=sys.stderr)
+
+        # Cross-platform fallback when PowerShell is unavailable.
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Ocean Studio — Application Logs")
+        dialog.resize(850, 520)
+        column = QVBoxLayout(dialog)
+        viewer = QPlainTextEdit(dialog)
+        viewer.setReadOnly(True)
+        viewer.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        column.addWidget(viewer)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(dialog.reject)
+        column.addWidget(button_box)
+
+        def reload_log():
+            try:
+                content = LOG_FILE.read_text(encoding="utf-8", errors="replace")
+                viewer.setPlainText(content[-100000:])
+                scrollbar = viewer.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
+            except OSError as error:
+                viewer.setPlainText(f"Unable to read log file: {error}")
+
+        timer = QTimer(dialog)
+        timer.timeout.connect(reload_log)
+        timer.start(1000)
+        reload_log()
+        dialog.exec()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -3979,7 +4100,7 @@ class UnderwaterApp(QMainWindow):
             "2. Choose an enhancement and click Enhance.\n"
             "3. Choose your best.pt weights (optional).\n"
             "4. Click Detect Objects or Compare YOLO.\n"
-            "5. Use Set background if you want a blurred photo behind the interface.\n"
+            "5. Use Open terminal / logs to watch live application output.\n"
             "6. Use the tabs for dataset, training, experiments and reports.\n\n"
             "Shortcuts: Ctrl+O = Open | Ctrl+D = Detect | "
             "Ctrl+S = Save | Ctrl+R = Reset Image.\n\n"
@@ -4326,6 +4447,7 @@ if __name__ == "__main__":
             )
         except Exception:
             pass
+    initialize_logging()
     app = QApplication(sys.argv)
     set_ocean_app_icon(app)
     window = UnderwaterApp()

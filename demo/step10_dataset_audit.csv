@@ -1,0 +1,4 @@
+﻿dataset_yaml,split,image_folder,images,label_files,background_images,boxes,issues
+C:\Users\Jerry\Desktop\underwater-vision-thesis\data.yaml,train,C:\Users\Jerry\Desktop\underwater-vision-thesis\train\images,448,448,1,3324,0
+C:\Users\Jerry\Desktop\underwater-vision-thesis\data.yaml,val,C:\Users\Jerry\Desktop\underwater-vision-thesis\valid\images,127,127,0,909,0
+C:\Users\Jerry\Desktop\underwater-vision-thesis\data.yaml,test,C:\Users\Jerry\Desktop\underwater-vision-thesis\test\images,63,63,0,582,2

@@ -1,0 +1,5 @@
+﻿method,setting,confidence_threshold,detections,mean_detection_confidence,prediction_time_ms
+Original (No Enhancement),0,0.25,1,0.5173483490943909,58.68
+CLAHE,20,0.25,1,0.6924659013748169,59.4
+White Balance,100,0.25,0,,54.25
+Gamma Correction,80,0.25,0,,55.83

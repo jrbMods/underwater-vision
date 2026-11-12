@@ -1,0 +1,2 @@
+﻿dataset_yaml,weights,split,precision,recall,map50,map5095,imagesize,confidence_for_validation,iou_nms
+C:/Users/Jerry/Desktop/underwater-vision-thesis/coco128.yaml,yolo26n.pt,val,0.6542757761100887,0.5721133064432926,0.6436553258214396,0.4788387309223894,640,0.001,0.7

@@ -1,0 +1,5 @@
+﻿method,successful_images,failed_rows,mean_detections,mean_confidence_nonempty,mean_prediction_time_ms
+Original (No Enhancement),4,0,0.25,0.5173,78.23
+CLAHE,4,0,0.75,0.4574,44.75
+White Balance,4,0,0.25,0.4162,45.46
+Gamma Correction,4,0,0.25,0.2559,47.38

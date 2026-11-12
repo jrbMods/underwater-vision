@@ -1,0 +1,7 @@
+# Ocean Studio — Underwater Vision AI
+# Installed into a local .venv by Install_Ocean_Studio_Requirements.bat
+# PyTorch and its dependencies are installed automatically by ultralytics.
+PySide6
+opencv-python
+numpy
+ultralytics
