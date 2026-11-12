@@ -2556,6 +2556,340 @@ class EnhancementAccuracyDialog(QDialog):
         super().closeEvent(event)
 
 
+
+# ============================================================================
+# Step 16: Final controlled 2-model x 4-enhancement evaluation.
+# Both checkpoints are tested against the SAME labeled images, with identical
+# preprocessing and validation settings. No test data is used for training.
+# ============================================================================
+
+class FinalExperimentWorker(QThread):
+    progress = Signal(str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, data_yaml, old_weights, new_weights, split, settings, parent=None):
+        super().__init__(parent)
+        self.data_yaml = str(data_yaml)
+        self.checkpoints = [('Step 11 (10-epoch)', str(old_weights)),
+                            ('Step 15 (improved)', str(new_weights))]
+        self.split = str(split)
+        self.settings = dict(settings)
+
+    def run(self):
+        try:
+            import yaml
+            with open(self.data_yaml, 'r', encoding='utf-8') as stream:
+                data = yaml.safe_load(stream)
+            if not isinstance(data, dict):
+                raise ValueError('data.yaml must be a YAML dictionary.')
+            names = dataset_class_names(data.get('names'))
+            image_dir = locate_dataset_split(self.data_yaml, data, self.split)
+            if image_dir is None:
+                raise ValueError(f'The dataset has no {self.split!r} split.')
+            images = sorted(p for p in image_dir.rglob('*')
+                            if p.is_file() and p.suffix.lower() in DATASET_IMAGE_SUFFIXES)
+            if not images:
+                raise ValueError('The selected split contains no images.')
+            if Path(self.checkpoints[0][1]).resolve() == Path(self.checkpoints[1][1]).resolve():
+                raise ValueError('Choose two DIFFERENT checkpoints (old and improved).')
+
+            # Build just four temporary image splits and reuse for BOTH models.
+            # This prevents differences from image conversion or file selection.
+            with tempfile.TemporaryDirectory(prefix='underwater_step16_') as workspace:
+                root = Path(workspace)
+                yaml_by_method = {}
+                for mi, method in enumerate(COMPARISON_METHODS, 1):
+                    if self.isInterruptionRequested():
+                        raise RuntimeError('Experiment was interrupted.')
+                    self.progress.emit(f'Preparing {method}: {mi}/4 ...')
+                    method_root = root / f'method_{mi}'
+                    output_images = method_root / 'images' / 'eval'
+                    output_labels = method_root / 'labels' / 'eval'
+                    output_images.mkdir(parents=True)
+                    output_labels.mkdir(parents=True)
+                    for number, img in enumerate(images, 1):
+                        if self.isInterruptionRequested():
+                            raise RuntimeError('Experiment was interrupted.')
+                        rel = img.relative_to(image_dir)
+                        label = annotation_path_for(img, image_dir)
+                        if label.exists():
+                            dst_label = (output_labels / rel).with_suffix('.txt')
+                            dst_label.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(label, dst_label)
+                        # Image filenames and relative paths are preserved on original.
+                        dst_image = (output_images / rel) if mi == 1 else (output_images / rel).with_suffix('.png')
+                        dst_image.parent.mkdir(parents=True, exist_ok=True)
+                        if mi == 1:
+                            shutil.copy2(img, dst_image)
+                        else:
+                            pixels = cv2.imdecode(np.fromfile(str(img), dtype=np.uint8), cv2.IMREAD_COLOR)
+                            if pixels is None:
+                                raise ValueError(f'Cannot read {img}')
+                            changed = apply_enhancement(pixels, method, self.settings[method])
+                            ok, encoded = cv2.imencode('.png', changed)
+                            if not ok:
+                                raise ValueError(f'Cannot encode enhanced image {img}')
+                            encoded.tofile(str(dst_image))
+                        if number % 100 == 0:
+                            self.progress.emit(f'{method}: {number}/{len(images)} prepared')
+                    config = {'path': str(method_root.resolve()),
+                              'train': 'images/eval', 'val': 'images/eval', 'test': 'images/eval',
+                              'names': [names[i] for i in range(len(names))], 'nc': len(names)}
+                    config_path = method_root / 'data.yaml'
+                    with open(config_path, 'w', encoding='utf-8') as stream:
+                        yaml.safe_dump(config, stream, sort_keys=False)
+                    yaml_by_method[method] = str(config_path)
+
+                records = []
+                for model_index, (model_label, weights) in enumerate(self.checkpoints, 1):
+                    model = YOLO(weights)
+                    if getattr(model, 'task', None) != 'detect':
+                        raise ValueError(f'{model_label} is not an object detector.')
+                    model_raw = model.names
+                    actual_names = ({int(k): str(v) for k, v in model_raw.items()}
+                                    if isinstance(model_raw, dict)
+                                    else {i: str(v) for i, v in enumerate(model_raw)})
+                    if set(actual_names) != set(names) or any(
+                        actual_names[i].strip().casefold() != names[i].strip().casefold()
+                        for i in names
+                    ):
+                        raise ValueError(
+                            f'{model_label} classes do not match the labeled dataset.\n'
+                            f'Model: {actual_names}\nDataset: {names}\n'
+                            'Use two best.pt files trained on the SAME Aquarium classes.')
+                    for mi, method in enumerate(COMPARISON_METHODS, 1):
+                        if self.isInterruptionRequested():
+                            raise RuntimeError('Experiment was interrupted.')
+                        index = (model_index - 1) * 4 + mi
+                        self.progress.emit(f'Evaluation {index}/8: {model_label} / {method}')
+                        metrics = model.val(
+                            data=yaml_by_method[method], split='val', imgsz=640,
+                            batch=4, conf=0.001, iou=0.7, workers=0,
+                            plots=False, verbose=False,
+                            project=str(root / 'validation_runs'),
+                            name=f'model_{model_index}_method_{mi}', exist_ok=True,
+                        )
+                        row = {
+                            'model': model_label, 'method': method,
+                            'precision': float(metrics.box.mp),
+                            'recall': float(metrics.box.mr),
+                            'map50': float(metrics.box.map50),
+                            'map5095': float(metrics.box.map),
+                            'images': len(images), 'split': self.split,
+                            'weights': str(Path(weights).resolve()),
+                            'dataset_yaml': str(Path(self.data_yaml).resolve()),
+                            'parameter': ('none' if mi == 1 else self.settings[method]),
+                            'imgsz': 640, 'batch': 4, 'conf': 0.001,
+                            'nms_iou': 0.7,
+                        }
+                        if any(not np.isfinite(row[key]) for key in
+                               ('precision', 'recall', 'map50', 'map5095')):
+                            raise ValueError('Non-finite metric returned by YOLO validation.')
+                        records.append(row)
+                        self.progress.emit(
+                            f'{index}/8 complete: {model_label}, {method}: '
+                            f'mAP@50={row["map50"]:.4f}')
+                self.completed.emit(records)
+        except Exception as error:
+            import traceback
+            self.failed.emit(f'{error}\n\n{traceback.format_exc()}')
+
+
+class FinalExperimentDialog(QDialog):
+    """Export full model-by-method scores and a compact paired baseline summary."""
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Step 16 — Final Controlled Research Experiment')
+        self.resize(1120, 700)
+        self.settings = dict(settings)
+        self.worker = None
+        self.records = []
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            'Compare TWO trained Aquarium models on the SAME labeled test images. '
+            'Each model is evaluated on Original, CLAHE, White Balance and Gamma. '
+            'This runs EIGHT evaluations and does not change your dataset.')
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        dataset_row = QHBoxLayout()
+        self.dataset_path = QLineEdit()
+        self.dataset_path.setPlaceholderText('Choose Aquarium data.yaml')
+        dataset_row.addWidget(QLabel('Dataset:'))
+        dataset_row.addWidget(self.dataset_path, 1)
+        dataset_choose = QPushButton('Browse...')
+        dataset_choose.clicked.connect(self.choose_dataset)
+        dataset_row.addWidget(dataset_choose)
+        layout.addLayout(dataset_row)
+
+        self.old_path = QLineEdit()
+        self.new_path = QLineEdit()
+        self.old_path.setPlaceholderText('Step 11 best.pt (10-epoch model)')
+        self.new_path.setPlaceholderText('Step 15 best.pt (improved model)')
+        for title, field in [('Old model:', self.old_path), ('New model:', self.new_path)]:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(title))
+            row.addWidget(field, 1)
+            browse = QPushButton('Browse...')
+            browse.clicked.connect(lambda checked=False, target=field: self.choose_model(target))
+            row.addWidget(browse)
+            layout.addLayout(row)
+
+        split_row = QHBoxLayout()
+        split_row.addWidget(QLabel('Split:'))
+        self.split = QComboBox()
+        self.split.addItems(['test', 'val'])
+        split_row.addWidget(self.split)
+        split_row.addStretch()
+        layout.addLayout(split_row)
+        method_info = QLabel('Enhancement settings: ' + ', '.join(
+            f'{method}={self.settings[method]}'
+            for method in ('CLAHE', 'White Balance', 'Gamma Correction')))
+        method_info.setWordWrap(True)
+        layout.addWidget(method_info)
+        row = QHBoxLayout()
+        self.run_button = QPushButton('Run Final Experiment (8 Evaluations)')
+        self.run_button.clicked.connect(self.start)
+        row.addWidget(self.run_button)
+        self.export_button = QPushButton('Export Final Results CSV')
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self.export_csv)
+        row.addWidget(self.export_button)
+        self.summary_button = QPushButton('Export Comparison Summary CSV')
+        self.summary_button.setEnabled(False)
+        self.summary_button.clicked.connect(self.export_summary)
+        row.addWidget(self.summary_button)
+        layout.addLayout(row)
+        self.status = QLabel('Ready. Select the dataset and both trained best.pt files.')
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.table = QTableWidget(8, 6)
+        self.table.setHorizontalHeaderLabels(
+            ['Model', 'Enhancement', 'Precision', 'Recall', 'mAP@50', 'mAP@50–95'])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.table)
+        disclaimer = QLabel(
+            'Scientific note: a test split that you already used for model decisions is no '
+            'longer an untouched final holdout. Keep tuning on validation data and, where '
+            'possible, reserve a separate unseen test set for final claims. '
+            'mAP measures accuracy; detection counts and confidence do not.')
+        disclaimer.setWordWrap(True)
+        layout.addWidget(disclaimer)
+
+    def choose_dataset(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, 'Choose data.yaml', '', 'YAML (*.yaml *.yml)')
+        if filename:
+            self.dataset_path.setText(filename)
+
+    def choose_model(self, target):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, 'Choose best.pt', '', 'YOLO weights (*.pt)')
+        if filename:
+            target.setText(filename)
+
+    def start(self):
+        if self.worker is not None and self.worker.isRunning():
+            return
+        dataset = self.dataset_path.text().strip()
+        old = self.old_path.text().strip()
+        new = self.new_path.text().strip()
+        if not Path(dataset).is_file() or not Path(old).is_file() or not Path(new).is_file():
+            QMessageBox.warning(self, 'Missing files',
+                                'Choose your real data.yaml and BOTH best.pt files.')
+            return
+        if Path(old).resolve() == Path(new).resolve():
+            QMessageBox.warning(self, 'Same model',
+                                'Old and improved models must be different files.')
+            return
+        self.records = []
+        self.table.clearContents()
+        self.export_button.setEnabled(False)
+        self.summary_button.setEnabled(False)
+        self.run_button.setEnabled(False)
+        self.status.setText('Preparing experiment data...')
+        self.worker = FinalExperimentWorker(dataset, old, new,
+                                            self.split.currentText(), self.settings, self)
+        self.worker.progress.connect(self.status.setText)
+        self.worker.completed.connect(self.finished_experiment)
+        self.worker.failed.connect(self.show_error)
+        self.worker.finished.connect(lambda: self.run_button.setEnabled(True))
+        self.worker.start()
+
+    def finished_experiment(self, rows):
+        self.records = rows
+        self.table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            values = [row['model'], row['method'],
+                      f"{row['precision']:.4f}", f"{row['recall']:.4f}",
+                      f"{row['map50']:.4f}", f"{row['map5095']:.4f}"]
+            for j, value in enumerate(values):
+                self.table.setItem(i, j, QTableWidgetItem(value))
+        self.status.setText('All 8 evaluations completed. Export both CSV files.')
+        self.export_button.setEnabled(True)
+        self.summary_button.setEnabled(True)
+
+    def show_error(self, detail):
+        self.status.setText('Experiment failed. See error details.')
+        QMessageBox.critical(self, 'Step 16 experiment error', detail)
+
+    def export_csv(self):
+        if not self.records:
+            return
+        name, _ = QFileDialog.getSaveFileName(
+            self, 'Save full research results', 'step16_final_results.csv',
+            'CSV (*.csv)')
+        if not name:
+            return
+        try:
+            with open(name, 'w', newline='', encoding='utf-8-sig') as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(self.records[0]))
+                writer.writeheader()
+                writer.writerows(self.records)
+            self.status.setText(f'Full results saved: {name}')
+        except OSError as error:
+            QMessageBox.critical(self, 'CSV export error', str(error))
+
+    def export_summary(self):
+        if not self.records:
+            return
+        name, _ = QFileDialog.getSaveFileName(
+            self, 'Save comparison summary', 'step16_comparison_summary.csv',
+            'CSV (*.csv)')
+        if not name:
+            return
+        try:
+            by_model = {}
+            for row in self.records:
+                by_model.setdefault(row['model'], {})[row['method']] = row
+            summary = []
+            for model, methods in by_model.items():
+                baseline = methods['Original (No Enhancement)']
+                for method, row in methods.items():
+                    summary.append({
+                        'model': model, 'method': method,
+                        'map50': row['map50'], 'map5095': row['map5095'],
+                        'map50_delta_from_original': row['map50'] - baseline['map50'],
+                        'map5095_delta_from_original': row['map5095'] - baseline['map5095'],
+                    })
+            with open(name, 'w', newline='', encoding='utf-8-sig') as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(summary[0]))
+                writer.writeheader()
+                writer.writerows(summary)
+            self.status.setText(f'Summary saved: {name}')
+        except Exception as error:
+            QMessageBox.critical(self, 'Summary export error', str(error))
+
+    def closeEvent(self, event):
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(
+                self, 'Experiment running',
+                'Please finish the experiment before closing this window.')
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+
 class UnderwaterApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2678,6 +3012,10 @@ class UnderwaterApp(QMainWindow):
         self.research_train_button.clicked.connect(self.open_research_training)
         main_layout.addWidget(self.research_train_button)
 
+        self.final_experiment_button = QPushButton('Step 16: Final Controlled Experiment')
+        self.final_experiment_button.clicked.connect(self.open_final_experiment)
+        main_layout.addWidget(self.final_experiment_button)
+
         # The enhancement slider controls the selected image-processing algorithm.
         enhancement_controls = QHBoxLayout()
         self.setting_label = QLabel("CLAHE clip limit: 2.0")
@@ -2799,6 +3137,10 @@ class UnderwaterApp(QMainWindow):
 
     def open_research_training(self):
         dialog = ResearchTrainingDialog(self)
+        dialog.exec()
+
+    def open_final_experiment(self):
+        dialog = FinalExperimentDialog(self.method_values, self)
         dialog.exec()
 
     def open_underwater_training(self):
