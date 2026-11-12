@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -32,6 +32,9 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QLineEdit,
     QSpinBox,
+    QTabWidget,
+    QSplitter,
+    QSizePolicy,
 )
 from ultralytics import YOLO
 
@@ -2890,11 +2893,352 @@ class FinalExperimentDialog(QDialog):
         super().closeEvent(event)
 
 
+
+# ============================================================================
+# Step 17: Research analysis of aggregate Step 16 results.
+# Uses observed CSV values only; no significance tests from eight aggregate rows.
+# ============================================================================
+
+STEP17_METRICS = (
+    ('precision', 'Precision'), ('recall', 'Recall'),
+    ('map50', 'mAP@50'), ('map5095', 'mAP@50-95'),
+)
+
+
+def read_step16_results(path):
+    """Validate the complete 2x4 experiment before generating any conclusions."""
+    with open(path, newline='', encoding='utf-8-sig') as stream:
+        rows = list(csv.DictReader(stream))
+    required = {'model', 'method', 'precision', 'recall', 'map50', 'map5095',
+                'images', 'split', 'dataset_yaml', 'weights', 'parameter',
+                'imgsz', 'batch', 'conf', 'nms_iou'}
+    if len(rows) != 8:
+        raise ValueError(f'Expected exactly 8 experiment rows, found {len(rows)}. '
+                         'Export the FULL Step 16 results CSV.')
+    if not rows or not required.issubset(rows[0]):
+        raise ValueError('Wrong CSV format. Use Step 16: Export Final Results CSV, '
+                         'not Export Comparison Summary CSV.')
+    models = list(dict.fromkeys(r['model'].strip() for r in rows))
+    if len(models) != 2 or any(not m for m in models):
+        raise ValueError('The CSV must contain exactly two named models.')
+    expected_methods = set(COMPARISON_METHODS)
+    records = {}
+    for row in rows:
+        model, method = row['model'].strip(), row['method'].strip()
+        if method not in expected_methods:
+            raise ValueError(f'Unknown enhancement method: {method}')
+        key = model, method
+        if key in records:
+            raise ValueError(f'Duplicate evaluation: {model}, {method}')
+        parsed = dict(row)
+        for metric, label in STEP17_METRICS:
+            try:
+                x = float(row[metric])
+            except (TypeError, ValueError) as err:
+                raise ValueError(f'Invalid {label} for {model} / {method}') from err
+            if not np.isfinite(x) or not 0 <= x <= 1:
+                raise ValueError(f'{label} outside 0–1 range: {x}')
+            parsed[metric] = x
+        try:
+            count = int(row['images'])
+        except (TypeError, ValueError) as err:
+            raise ValueError('Invalid image count.') from err
+        if count < 1:
+            raise ValueError('Image count must be positive.')
+        parsed['images'] = count
+        records[key] = parsed
+    if set(records) != {(m, method) for m in models for method in COMPARISON_METHODS}:
+        raise ValueError('Missing model/method combination in the Step 16 CSV.')
+    # These properties need to be identical to support a controlled comparison.
+    for field in ('images', 'split', 'dataset_yaml', 'imgsz', 'batch', 'conf', 'nms_iou'):
+        values = {str(r[field]).strip() for r in records.values()}
+        if len(values) != 1:
+            raise ValueError(f'Inconsistent {field} across experiment rows: {values}')
+    for method in COMPARISON_METHODS:
+        parameter_values = {str(records[(m, method)]['parameter']).strip() for m in models}
+        if len(parameter_values) != 1:
+            raise ValueError(f'Enhancement parameter differs between models: {method}')
+    weights_by_model = {}
+    for model in models:
+        weights = {records[(model, method)]['weights'].strip() for method in COMPARISON_METHODS}
+        if len(weights) != 1:
+            raise ValueError(f'Inconsistent model checkpoints for {model}')
+        weights_by_model[model] = next(iter(weights))
+    if weights_by_model[models[0]] == weights_by_model[models[1]]:
+        raise ValueError('Both models refer to the same checkpoint.')
+    return models, records
+
+
+def build_step17_analysis(models, records):
+    """Descriptive, paired-by-method comparisons; no unsupported inference."""
+    old, new = models
+    baseline = 'Original (No Enhancement)'
+    data = []
+    for method in COMPARISON_METHODS:
+        a, b = records[(old, method)], records[(new, method)]
+        item = {'method': method}
+        for metric, _ in STEP17_METRICS:
+            item[f'old_{metric}'] = a[metric]
+            item[f'new_{metric}'] = b[metric]
+            item[f'improvement_{metric}_pp'] = (b[metric] - a[metric]) * 100
+            for label, row, model in [('old', a, old), ('new', b, new)]:
+                item[f'{label}_{metric}_vs_original_pp'] = (
+                    row[metric] - records[(model, baseline)][metric]) * 100
+        data.append(item)
+    return data
+
+
+def step17_markdown_report(source, models, records, differences):
+    old, new = models
+    common = records[(old, COMPARISON_METHODS[0])]
+    header = [
+        '# Step 17: Descriptive Research Analysis', '',
+        f'Source CSV: `{source}`', '',
+        f'Comparison: **{old}** versus **{new}**', '',
+        f"Dataset: `{common['dataset_yaml']}`  ",
+        f"Dataset split: `{common['split']}`  ",
+        f"Images per condition: {common['images']}  ",
+        f"Image size: {common['imgsz']}; batch: {common['batch']}; "
+        f"confidence: {common['conf']}; NMS IoU: {common['nms_iou']}", '',
+        '## Model comparison (percentage-point differences)', '',
+        '| Enhancement | Old mAP@50-95 | New mAP@50-95 | Difference (pp) |',
+        '|---|---:|---:|---:|',
+    ]
+    for row in differences:
+        header.append(f"| {row['method']} | {row['old_map5095']:.4f} | "
+                      f"{row['new_map5095']:.4f} | {row['improvement_map5095_pp']:+.2f} |")
+    header += ['', '## Enhancement compared with original images', '',
+               '| Model | Enhancement | mAP@50-95 change (pp) |',
+               '|---|---|---:|']
+    for label, model in [('old', old), ('new', new)]:
+        for row in differences[1:]:
+            header.append(f"| {model} | {row['method']} | "
+                          f"{row[f'{label}_map5095_vs_original_pp']:+.2f} |")
+    baseline = differences[0]
+    delta = baseline['improvement_map5095_pp']
+    if delta > 0:
+        interpretation = 'higher'
+    elif delta < 0:
+        interpretation = 'lower'
+    else:
+        interpretation = 'equal'
+    header += ['', '## Interpretation', '',
+               f'On the original images, the newer model had {interpretation} '
+               f'mAP@50-95 by {abs(delta):.2f} percentage points compared with '
+               'the earlier model. This is an observed difference on this split, '
+               'not proof of improvement on future data.', '',
+               '## Limitations and responsible reporting', '',
+               '- These eight rows contain *aggregate* metrics only. They cannot '
+               'support p-values, confidence intervals, or claims of statistical significance.',
+               '- The training runs may differ in more than epoch count, so this '
+               'comparison does not isolate the causal effect of training duration.',
+               '- If the test images informed earlier decisions, this is not a '
+               'fully untouched final test set. Use a truly unseen holdout for final claims.',
+               '- Aquarium imagery is not representative of all open-water environments.',
+               '- Report failures, class-wise performance and qualitative examples '
+               'alongside these aggregate metrics.',
+               '- For inferential statistics, retain image-level paired predictions '
+               'or evaluation data and use a suitable image-level resampling design.',
+               '', '## Reproducibility', '',
+               f'- Earlier checkpoint: `{records[(old, COMPARISON_METHODS[0])]["weights"]}`',
+               f'- Improved checkpoint: `{records[(new, COMPARISON_METHODS[0])]["weights"]}`',
+               '- Enhance the same images with the same parameters for each model.',
+               '- Preserve original results CSV, dataset version and software versions.',
+               '']
+    return '\n'.join(header)
+
+
+class Step17MetricChart(QWidget):
+    """Two-model chart; painter is always closed to avoid the Qt Step 8 bug."""
+    def __init__(self, rows, key='map5095', parent=None):
+        super().__init__(parent)
+        self.rows = rows
+        self.key = key
+        self.setMinimumHeight(300)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        if not painter.isActive():
+            return
+        try:
+            self.draw_chart(painter, self.width(), self.height())
+        finally:
+            painter.end()
+
+    def draw_chart(self, painter, width, height):
+        painter.fillRect(0, 0, width, height, QColor('#ffffff'))
+        painter.setPen(QColor('#173247'))
+        painter.setFont(QFont('Arial', 10))
+        painter.drawText(16, 25, 'mAP@50–95  |  Old model vs improved model  |  0–1 scale')
+        left = 152
+        available = max(90, width - left - 75)
+        for i in range(5):
+            x = left + round(available * i / 4)
+            painter.setPen(QPen(QColor('#e3e9ed'), 1))
+            painter.drawLine(x, 39, x, height - 32)
+            painter.setPen(QColor('#445968'))
+            painter.drawText(x - 10, height - 10, f'{i/4:.2f}')
+        for i, row in enumerate(self.rows):
+            y = 55 + i * 57
+            painter.setPen(QColor('#173247'))
+            painter.drawText(10, y + 15, row['method'].replace(' (No Enhancement)', ''))
+            for j, (field, color) in enumerate((('old_map5095', '#176b87'),
+                                                ('new_map5095', '#168579'))):
+                value = row[field]
+                painter.fillRect(left, y + j * 20, max(1, round(available * value)), 16,
+                                 QColor(color))
+                painter.setPen(QColor('#173247'))
+                painter.drawText(min(width - 57, left + round(available * value) + 5),
+                                 y + j * 20 + 13, f'{value:.3f}')
+        painter.fillRect(17, height - 29, 12, 10, QColor('#176b87'))
+        painter.fillRect(145, height - 29, 12, 10, QColor('#168579'))
+        painter.drawText(34, height - 19, 'Old model')
+        painter.drawText(162, height - 19, 'Improved model')
+
+
+class Step17AnalysisDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Step 17 — Scientific Results Analysis')
+        self.resize(1080, 790)
+        self.models = None
+        self.records = None
+        self.differences = None
+        self.source = None
+        layout = QVBoxLayout(self)
+        introductory = QLabel('Open the FULL Step 16 results CSV (8 rows). '
+                             'Compare accuracy differences and export a thesis draft report. '
+                             'This is descriptive analysis, NOT a statistical significance test.')
+        introductory.setWordWrap(True)
+        layout.addWidget(introductory)
+        choose = QPushButton('Open Step 16 Final Results CSV')
+        choose.clicked.connect(self.load_csv)
+        layout.addWidget(choose)
+        self.source_label = QLabel('No results loaded yet.')
+        self.source_label.setWordWrap(True)
+        layout.addWidget(self.source_label)
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels([
+            'Method', 'Old mAP@50', 'New mAP@50', 'Change (pp)',
+            'Old mAP@50-95', 'New mAP@50-95', 'Change (pp)',
+            'New enhancement vs original (pp)'])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table)
+        self.chart = Step17MetricChart([])
+        layout.addWidget(self.chart)
+        note = QLabel('CAUTION: Eight aggregate results are not enough to claim '
+                      'statistical significance. This window only reports observed '
+                      'percentage-point differences. No p-values are calculated.')
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        controls = QHBoxLayout()
+        self.export_csv = QPushButton('Export Analysis CSV')
+        self.export_csv.setEnabled(False)
+        self.export_csv.clicked.connect(self.save_csv)
+        controls.addWidget(self.export_csv)
+        self.export_report = QPushButton('Export Thesis Report (.md)')
+        self.export_report.setEnabled(False)
+        self.export_report.clicked.connect(self.save_report)
+        controls.addWidget(self.export_report)
+        self.export_png = QPushButton('Save Comparison Graph PNG')
+        self.export_png.setEnabled(False)
+        self.export_png.clicked.connect(self.save_png)
+        controls.addWidget(self.export_png)
+        layout.addLayout(controls)
+
+    def load_csv(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Open Step 16 full results CSV', '', 'CSV Files (*.csv)')
+        if not path:
+            return
+        try:
+            models, records = read_step16_results(path)
+            differences = build_step17_analysis(models, records)
+        except Exception as error:
+            QMessageBox.critical(self, 'Cannot analyze CSV', str(error))
+            return
+        self.source = path
+        self.models = models
+        self.records = records
+        self.differences = differences
+        self.source_label.setText(f'Loaded: {Path(path).name}  |  '
+                                  f'{models[0]} vs {models[1]}')
+        self.table.setRowCount(len(differences))
+        for i, row in enumerate(differences):
+            fields = [row['method'], f"{row['old_map50']:.4f}",
+                      f"{row['new_map50']:.4f}",
+                      f"{row['improvement_map50_pp']:+.2f}",
+                      f"{row['old_map5095']:.4f}",
+                      f"{row['new_map5095']:.4f}",
+                      f"{row['improvement_map5095_pp']:+.2f}",
+                      f"{row['new_map5095_vs_original_pp']:+.2f}"]
+            for j, text in enumerate(fields):
+                self.table.setItem(i, j, QTableWidgetItem(text))
+        self.chart.rows = differences
+        self.chart.update()
+        for button in (self.export_csv, self.export_report, self.export_png):
+            button.setEnabled(True)
+
+    def save_csv(self):
+        path, _ = QFileDialog.getSaveFileName(self, 'Save Step 17 analysis',
+                                              'step17_analysis.csv', 'CSV Files (*.csv)')
+        if not path:
+            return
+        try:
+            with open(path, 'w', newline='', encoding='utf-8-sig') as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(self.differences[0]))
+                writer.writeheader()
+                writer.writerows(self.differences)
+            QMessageBox.information(self, 'Saved', 'Analysis CSV exported.')
+        except Exception as error:
+            QMessageBox.critical(self, 'Export failed', str(error))
+
+    def save_report(self):
+        path, _ = QFileDialog.getSaveFileName(self, 'Save descriptive thesis draft',
+                                              'step17_research_analysis.md',
+                                              'Markdown (*.md)')
+        if not path:
+            return
+        try:
+            report = step17_markdown_report(self.source, self.models,
+                                            self.records, self.differences)
+            Path(path).write_text(report, encoding='utf-8')
+            QMessageBox.information(self, 'Saved', 'Markdown report exported.')
+        except Exception as error:
+            QMessageBox.critical(self, 'Export failed', str(error))
+
+    def save_png(self):
+        path, _ = QFileDialog.getSaveFileName(self, 'Save analysis chart',
+                                              'step17_model_comparison.png',
+                                              'PNG Image (*.png)')
+        if not path:
+            return
+        try:
+            image = QImage(1050, 320, QImage.Format.Format_RGB32)
+            if image.isNull():
+                raise MemoryError('Could not allocate chart image.')
+            image.fill(QColor('white'))
+            painter = QPainter(image)
+            if not painter.isActive():
+                raise RuntimeError('Could not create image painter.')
+            try:
+                self.chart.draw_chart(painter, image.width(), image.height())
+            finally:
+                painter.end()
+            if not image.save(path, 'PNG'):
+                raise OSError('Qt failed to save the PNG file.')
+            QMessageBox.information(self, 'Saved', 'Graph PNG exported.')
+        except Exception as error:
+            QMessageBox.critical(self, 'Chart export failed', str(error))
+
+
 class UnderwaterApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Underwater Vision AI")
-        self.resize(1100, 750)
+        self.resize(1230, 820)
 
         self.original = None
         self.processed = None
@@ -2905,11 +3249,20 @@ class UnderwaterApp(QMainWindow):
             method: settings[2] for method, settings in METHOD_SETTINGS.items()
         }
         self.setup_ui()
+        self.configure_shortcuts()
 
     def setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
+        main_layout.setSpacing(9)
+        main_layout.setContentsMargins(14, 12, 14, 12)
+        central.setStyleSheet("""
+            QWidget { font-size: 12px; }
+            QPushButton { padding: 7px 10px; }
+            QTabWidget::pane { border: 1px solid #8e9ca4; border-radius: 5px; }
+            QTabBar::tab { padding: 9px 16px; }
+        """)
 
         title = QLabel("UNDERWATER VISION AI")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2948,7 +3301,9 @@ class UnderwaterApp(QMainWindow):
         diagnostic_row.addWidget(self.test_detection_button)
         main_layout.addLayout(diagnostic_row)
 
+        # Step 18: two compact toolbars keep the main workflow visible.
         controls = QHBoxLayout()
+        controls.setSpacing(7)
         self.open_button = QPushButton("Open Image")
         self.open_button.clicked.connect(self.open_image)
         controls.addWidget(self.open_button)
@@ -2956,30 +3311,11 @@ class UnderwaterApp(QMainWindow):
         self.enhancement_choice = QComboBox()
         self.enhancement_choice.addItems(list(METHOD_SETTINGS.keys()))
         self.enhancement_choice.currentTextChanged.connect(self.on_method_changed)
-        controls.addWidget(self.enhancement_choice)
+        controls.addWidget(self.enhancement_choice, 1)
 
         self.enhance_button = QPushButton("Enhance")
         self.enhance_button.clicked.connect(self.enhance)
         controls.addWidget(self.enhance_button)
-
-        self.compare_button = QPushButton("Compare All")
-        self.compare_button.clicked.connect(self.compare_all)
-        controls.addWidget(self.compare_button)
-
-        self.compare_yolo_button = QPushButton("Compare YOLO")
-        self.compare_yolo_button.clicked.connect(self.compare_detections)
-        controls.addWidget(self.compare_yolo_button)
-
-        self.batch_button = QPushButton("Batch YOLO")
-        self.batch_button.clicked.connect(self.compare_batch)
-        controls.addWidget(self.batch_button)
-
-        self.report_button = QPushButton("Open Batch Report")
-        self.report_button.clicked.connect(self.open_saved_batch_report)
-
-        self.detector_choice = QComboBox()
-        self.detector_choice.addItems(["YOLO"])
-        controls.addWidget(self.detector_choice)
 
         self.detect_button = QPushButton("Detect Objects")
         self.detect_button.clicked.connect(self.detect)
@@ -2988,33 +3324,59 @@ class UnderwaterApp(QMainWindow):
         self.save_button = QPushButton("Save Result")
         self.save_button.clicked.connect(self.save_image)
         controls.addWidget(self.save_button)
+
+        self.reset_image_button = QPushButton("Reset Image")
+        self.reset_image_button.setToolTip("Restore the original image without changing your model")
+        self.reset_image_button.clicked.connect(self.reset_image)
+        controls.addWidget(self.reset_image_button)
         main_layout.addLayout(controls)
-        main_layout.addWidget(self.report_button)
+
+        self.compare_button = QPushButton("Compare All")
+        self.compare_button.clicked.connect(self.compare_all)
+        self.compare_yolo_button = QPushButton("Compare YOLO")
+        self.compare_yolo_button.clicked.connect(self.compare_detections)
+        self.batch_button = QPushButton("Batch YOLO")
+        self.batch_button.clicked.connect(self.compare_batch)
+        self.report_button = QPushButton("Open Batch Report")
+        self.report_button.clicked.connect(self.open_saved_batch_report)
+
         self.evaluate_button = QPushButton("Step 9: Evaluate Labeled Dataset")
         self.evaluate_button.clicked.connect(self.open_ground_truth_evaluation)
-        main_layout.addWidget(self.evaluate_button)
         self.dataset_check_button = QPushButton("Step 10: Check Underwater Dataset")
         self.dataset_check_button.clicked.connect(self.open_dataset_audit)
-        main_layout.addWidget(self.dataset_check_button)
         self.train_button = QPushButton("Step 11: Train Underwater YOLO")
         self.train_button.clicked.connect(self.open_underwater_training)
-        main_layout.addWidget(self.train_button)
-        self.accuracy_compare_button = QPushButton(
-            "Step 13: Compare Enhancement Accuracy")
-        self.accuracy_compare_button.clicked.connect(self.open_enhancement_accuracy)
-        main_layout.addWidget(self.accuracy_compare_button)
-        self.accuracy_report_button = QPushButton(
-            'Step 14: Open Accuracy Charts / CSV Report')
-        self.accuracy_report_button.clicked.connect(self.open_accuracy_report)
-        main_layout.addWidget(self.accuracy_report_button)
-
-        self.research_train_button = QPushButton('Step 15: Improve Model Training')
+        self.research_train_button = QPushButton("Step 15: Improve Model Training")
         self.research_train_button.clicked.connect(self.open_research_training)
-        main_layout.addWidget(self.research_train_button)
 
-        self.final_experiment_button = QPushButton('Step 16: Final Controlled Experiment')
+        self.accuracy_compare_button = QPushButton("Step 13: Compare Enhancement Accuracy")
+        self.accuracy_compare_button.clicked.connect(self.open_enhancement_accuracy)
+        self.accuracy_report_button = QPushButton("Step 14: Open Accuracy Charts / CSV Report")
+        self.accuracy_report_button.clicked.connect(self.open_accuracy_report)
+        self.final_experiment_button = QPushButton("Step 16: Final Controlled Experiment")
         self.final_experiment_button.clicked.connect(self.open_final_experiment)
-        main_layout.addWidget(self.final_experiment_button)
+        self.step17_analysis_button = QPushButton("Step 17: Analyze Final Results")
+        self.step17_analysis_button.clicked.connect(self.open_step17_analysis)
+
+        # Each existing feature is still available, but now grouped by purpose.
+        self.tool_tabs = QTabWidget()
+        tab_groups = [
+            ("Explore & Batch", [self.compare_button, self.compare_yolo_button,
+                                  self.batch_button, self.report_button]),
+            ("Dataset & Training", [self.dataset_check_button, self.evaluate_button,
+                                    self.train_button, self.research_train_button]),
+            ("Research & Reports", [self.accuracy_compare_button, self.accuracy_report_button,
+                                    self.final_experiment_button, self.step17_analysis_button]),
+        ]
+        for tab_name, buttons in tab_groups:
+            page = QWidget()
+            grid = QGridLayout(page)
+            grid.setContentsMargins(10, 10, 10, 10)
+            for index, button in enumerate(buttons):
+                grid.addWidget(button, index // 2, index % 2)
+            self.tool_tabs.addTab(page, tab_name)
+        self.tool_tabs.setMaximumHeight(145)
+        main_layout.addWidget(self.tool_tabs)
 
         # The enhancement slider controls the selected image-processing algorithm.
         enhancement_controls = QHBoxLayout()
@@ -3044,8 +3406,7 @@ class UnderwaterApp(QMainWindow):
         confidence_controls.addWidget(self.confidence_slider)
         main_layout.addLayout(confidence_controls)
 
-        image_layout = QHBoxLayout()
-        left_layout = QVBoxLayout()
+        left_layout = QVBoxLayout() 
         right_layout = QVBoxLayout()
         left_title = QLabel("Original Image")
         right_title = QLabel("Processed Image / Detection Result")
@@ -3056,7 +3417,8 @@ class UnderwaterApp(QMainWindow):
         self.result_label = QLabel("No result yet")
         for label in (self.original_label, self.result_label):
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setMinimumSize(350, 300)
+            label.setMinimumSize(240, 230)
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
             label.setStyleSheet(
                 "background: #172b3a; color: white; border: 1px solid #456;"
             )
@@ -3065,13 +3427,61 @@ class UnderwaterApp(QMainWindow):
         left_layout.addWidget(self.original_label)
         right_layout.addWidget(right_title)
         right_layout.addWidget(self.result_label)
-        image_layout.addLayout(left_layout)
-        image_layout.addLayout(right_layout)
-        main_layout.addLayout(image_layout)
+        before_panel = QWidget()
+        before_panel.setLayout(left_layout)
+        after_panel = QWidget()
+        after_panel.setLayout(right_layout)
+        self.image_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.image_splitter.addWidget(before_panel)
+        self.image_splitter.addWidget(after_panel)
+        self.image_splitter.setStretchFactor(0, 1)
+        self.image_splitter.setStretchFactor(1, 1)
+        main_layout.addWidget(self.image_splitter, 1)
 
         self.status = QLabel("Ready. Choose an image to begin.")
+        self.status.setWordWrap(True)
         main_layout.addWidget(self.status)
+        help_button = QPushButton("Quick Start / Shortcuts")
+        help_button.clicked.connect(self.show_quick_start)
+        help_button.setMaximumWidth(220)
+        main_layout.addWidget(help_button)
         self.on_method_changed(self.enhancement_choice.currentText())
+
+    def configure_shortcuts(self):
+        """Small, memorable keyboard shortcuts for a live demonstration."""
+        for sequence, callback in (
+            ("Ctrl+O", self.open_image),
+            ("Ctrl+S", self.save_image),
+            ("Ctrl+R", self.reset_image),
+            ("Ctrl+D", self.detect),
+        ):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(callback)
+
+    def reset_image(self):
+        """Remove enhancement and bounding boxes without clearing the source."""
+        if self.original is None:
+            QMessageBox.information(self, "No image", "Open an image first.")
+            return
+        self.processed = self.original.copy()
+        self.annotated = None
+        self.show_image(self.original, self.original_label)
+        self.show_image(self.processed, self.result_label)
+        self.status.setText("Original image restored. Your selected YOLO model is unchanged.")
+
+    def show_quick_start(self):
+        QMessageBox.information(
+            self, "Underwater Vision AI — Quick Start",
+            "1. Open Image → choose a photo.\n"
+            "2. Choose an enhancement and click Enhance.\n"
+            "3. Choose your best.pt weights (optional).\n"
+            "4. Click Detect Objects or Compare YOLO.\n"
+            "5. Use the tabs for dataset, training, experiments and reports.\n\n"
+            "Shortcuts: Ctrl+O = Open | Ctrl+D = Detect | "
+            "Ctrl+S = Save | Ctrl+R = Reset Image.\n\n"
+            "For thesis results, use labeled test data and report mAP, "
+            "precision and recall—not just the number of detected boxes."
+        )
 
     def set_detection_model(self, weights):
         """Load and validate model before switching; retain old one on failure."""
@@ -3381,6 +3791,10 @@ class UnderwaterApp(QMainWindow):
             )
             box.setDetailedText(details)
             box.exec()
+
+    def open_step17_analysis(self):
+        dialog = Step17AnalysisDialog(self)
+        dialog.exec()
 
     def save_image(self):
         if self.processed is None:
