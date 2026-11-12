@@ -9,8 +9,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QThread, Signal, QEvent
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QPen, QFont, QKeySequence, QShortcut, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -35,9 +35,217 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QSplitter,
     QSizePolicy,
+    QFrame,
 )
 from ultralytics import YOLO
 
+# Branding files are optional. The application still opens if they are missing.
+PROJECT_DIR = Path(__file__).resolve().parent
+ASSETS_DIR = PROJECT_DIR / "assets"
+PROFILE_FILE = PROJECT_DIR / "profile.json"
+
+
+def load_profile():
+    defaults = {"first_name": "Your first name", "last_name": "Your surname",
+                "email": "", "fnumber": "",
+                "university": "Your university", "program": "Master's thesis",
+                "project_title": "Underwater Vision AI"}
+    if PROFILE_FILE.is_file():
+        try:
+            data = json.loads(PROFILE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for key in defaults:
+                    if isinstance(data.get(key), str):
+                        defaults[key] = data[key].strip()
+        except (OSError, ValueError):
+            pass
+    return defaults
+
+
+def logo_pixmap(filename, width, height):
+    file = ASSETS_DIR / filename
+    if not file.is_file():
+        return None
+    pixmap = QPixmap(str(file))
+    if pixmap.isNull():
+        return None
+    return pixmap.scaled(width, height, Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+
+
+def find_background_asset():
+    """Return the first usable background image from the assets folder."""
+    candidates = [
+        "background_custom.png", "background_custom.jpg", "background_custom.jpeg", "background_custom.webp",
+        "background.png", "background.jpg", "background.jpeg", "background.webp",
+    ]
+    for name in candidates:
+        file = ASSETS_DIR / name
+        if file.is_file():
+            return file
+    return None
+
+
+def build_blurred_background_pixmap(width, height):
+    """Load a user photo, crop it to the window, blur it, and darken it slightly."""
+    if width < 2 or height < 2:
+        return None
+    file = find_background_asset()
+    if file is None:
+        return None
+    try:
+        data = np.fromfile(file, dtype=np.uint8)
+        image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+    if image is None:
+        return None
+    src_h, src_w = image.shape[:2]
+    scale = max(width / max(1, src_w), height / max(1, src_h))
+    resized_w = max(width, int(src_w * scale))
+    resized_h = max(height, int(src_h * scale))
+    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+    image = cv2.resize(image, (resized_w, resized_h), interpolation=interpolation)
+    x0 = max(0, (resized_w - width) // 2)
+    y0 = max(0, (resized_h - height) // 2)
+    image = image[y0:y0 + height, x0:x0 + width]
+    image = cv2.GaussianBlur(image, (0, 0), sigmaX=6, sigmaY=6)
+    dark_overlay = np.full_like(image, (10, 18, 28))
+    image = cv2.addWeighted(image, 0.56, dark_overlay, 0.44, 0.0)
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    qimage = QImage(rgb.data, width, height, width * 3, QImage.Format.Format_RGB888).copy()
+    return QPixmap.fromImage(qimage)
+
+
+def set_ocean_app_icon(app):
+    """Choose icon.png or app_icon.ico. Windows taskbar may prefer .ico."""
+    for name in ("app_icon.ico", "app_icon.png"):
+        path = ASSETS_DIR / name
+        if path.is_file():
+            icon = QIcon(str(path))
+            if not icon.isNull():
+                app.setWindowIcon(icon)
+                return
+
+
+
+OCEAN_STYLESHEET = r"""
+QMainWindow {
+    background-color: #06101a;
+}
+QWidget#root {
+    background: transparent;
+    color: #e8f4ff;
+    font-family: 'Segoe UI', 'Inter', 'Arial';
+    font-size: 12px;
+}
+QLabel { color: #dfebf4; background: transparent; }
+QLabel#brandIcon {
+    border: 1px solid #1e7893; border-radius: 14px;
+    background: #0a3847; color: #65e5e6; font-size: 32px;
+}
+QLabel#brandTitle { font-size: 24px; font-weight: 800; color: #f4fbff; letter-spacing: 2px; }
+QLabel#subTitle { font-size: 10px; color: #819aaf; letter-spacing: 1px; }
+QLabel#headerTag {
+    background: rgba(15, 43, 43, 218); border: 1px solid #244f57; border-radius: 13px;
+    color: #bfece2; padding: 8px 13px; font-weight: 700; font-size: 10px;
+}
+QLabel#sectionTitle { font-size: 21px; font-weight: 750; color: #f2f9ff; }
+QLabel#fieldLabel, QLabel#imageCardTitle, QLabel#cardHeading {
+    color: #b8cfdf; font-size: 10px; font-weight: 750; letter-spacing: 1px;
+}
+QLabel#hintText, QLabel#imageCardHint { color: #7992aa; font-size: 10px; }
+QLabel#cardIndex {
+    color: #66e1e6; font-weight: 800; background: #123a49;
+    border-radius: 7px; padding: 4px 7px;
+}
+QLabel#valueText { color: #bce7f2; font-weight: 650; }
+QLabel#modelName {
+    color: #a2f6ef; font-size: 13px; font-weight: 700;
+    background: #0b2433; border: 1px solid #265166;
+    border-radius: 9px; padding: 10px 11px;
+}
+QFrame#controlCard, QFrame#imageCard, QFrame#actionBar, QFrame#footer {
+    background: rgba(11, 23, 37, 228); border: 1px solid #293c4d; border-radius: 15px;
+}
+QFrame#imageCard { background: rgba(9, 19, 30, 232); }
+QLabel#imageCanvas {
+    background: #071422; color: #5d8297; border: 1px dashed #25475b;
+    border-radius: 11px; font-size: 12px; font-weight: 650;
+}
+QLabel#statusText { color: #bad0df; font-size: 11px; }
+QLabel#statusLight { color: #55e7bf; font-size: 15px; }
+QPushButton {
+    color: #dce8ef; background: rgba(20, 37, 52, 228);
+    border: 1px solid #335066; border-radius: 9px;
+    padding: 9px 13px; min-height: 19px; font-weight: 600;
+}
+QPushButton:hover { color: white; border-color: #3893a3; background: #1a3b51; }
+QPushButton:pressed { background: #103346; }
+QPushButton:disabled { color: #62798a; background: #132234; border-color: #243345; }
+QPushButton#accentButton, QPushButton#detectButton {
+    background: #0e939b; border: 1px solid #20b5bd;
+    color: #041922; font-weight: 800;
+}
+QPushButton#accentButton:hover, QPushButton#detectButton:hover {
+    background: #28cad0; border-color: #64f1ee;
+}
+QPushButton#detectButton { background: #65dbc5; border-color: #72edd8; }
+QPushButton#detectButton:hover { background: #a0f0e1; }
+QComboBox {
+    color: #e4f3f7; background: #10283a; border: 1px solid #34576b;
+    border-radius: 9px; padding: 9px 11px; min-height: 19px;
+}
+QComboBox:hover, QComboBox:focus { border-color: #38b3bf; }
+QComboBox::drop-down { border: none; width: 24px; }
+QComboBox QAbstractItemView {
+    background: #102536; color: #e3f5f7; border: 1px solid #356074;
+    selection-background-color: #116b7a; selection-color: white;
+}
+QSlider::groove:horizontal { height: 5px; border-radius: 2px; background: #254456; }
+QSlider::sub-page:horizontal { background: #21c3c4; border-radius: 2px; }
+QSlider::handle:horizontal {
+    background: #b2ffff; border: 2px solid #0f8a9b;
+    width: 15px; margin: -7px 0; border-radius: 9px;
+}
+QTabWidget#researchTabs::pane {
+    background: #0d1e30; border: 1px solid #24394a;
+    border-radius: 12px;
+}
+QTabWidget#researchTabs QTabBar::tab {
+    background: #0c1a2a; color: #839bb0;
+    border: 1px solid #1c3144; border-bottom: none;
+    padding: 10px 17px; margin-right: 4px;
+    border-top-left-radius: 8px; border-top-right-radius: 8px;
+    font-weight: 650;
+}
+QTabWidget#researchTabs QTabBar::tab:selected {
+    background: #143345; color: #7feee9; border-color: #2e6c7b;
+}
+QScrollArea#sidebarScroll, QWidget#sidebar, QWidget#researchPage {
+    background: transparent; border: none;
+}
+QScrollBar:vertical {
+    background: #0a1b2a; width: 7px; margin: 3px 0; border: none;
+}
+QScrollBar::handle:vertical {
+    background: #2d5966; border-radius: 3px; min-height: 28px;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+QSplitter#imageSplitter::handle { background: #07111f; width: 9px; }
+QToolTip { color: white; background: #143244; border: 1px solid #3c7f8c; }
+QFrame#aboutInfoCard, QFrame#aboutLogoCard {
+    background: #10273a; border: 1px solid #29485d; border-radius: 11px;
+}
+QLabel#aboutSectionLabel { color: #83bbce; font-size: 10px; font-weight: 750; }
+QLabel#aboutValue { color: #f2fbff; font-size: 14px; font-weight: 650; }
+QLabel#aboutFooter { color: #8eb1c5; font-size: 11px; }
+QLabel#workspaceLogoText { color: #53cdd1; font-weight: 800; letter-spacing: 2px; }
+QLabel#aboutName { font-size: 17px; color: #f4fbff; font-weight: 800; }
+QLabel#aboutProject { color: #6de6dc; font-size: 11px; font-weight: 650; }
+QLabel#aboutLogo { background: #091929; border: 1px solid #2a5264;
+                   border-radius: 9px; color: #7794a6; font-size: 10px; }
+"""
 
 def enhance_image(image, clip_limit=2.0):
     """Improve local contrast using CLAHE on the LAB lightness channel."""
@@ -3238,6 +3446,7 @@ class UnderwaterApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Underwater Vision AI")
+        self.setWindowIcon(QApplication.instance().windowIcon())
         self.resize(1230, 820)
 
         self.original = None
@@ -3252,200 +3461,494 @@ class UnderwaterApp(QMainWindow):
         self.configure_shortcuts()
 
     def setup_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
-        main_layout.setSpacing(9)
-        main_layout.setContentsMargins(14, 12, 14, 12)
-        central.setStyleSheet("""
-            QWidget { font-size: 12px; }
-            QPushButton { padding: 7px 10px; }
-            QTabWidget::pane { border: 1px solid #8e9ca4; border-radius: 5px; }
-            QTabBar::tab { padding: 9px 16px; }
-        """)
+        """Create the Ocean Studio workstation without changing research logic."""
+        self.setWindowTitle("Underwater Vision AI  |  Ocean Studio")
+        self.resize(1480, 920)
+        self.setMinimumSize(1050, 680)
+        self.setStyleSheet(OCEAN_STYLESHEET)
 
-        title = QLabel("UNDERWATER VISION AI")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet(
-            "font-size: 26px; font-weight: bold;"
-            "color: #0077b6; padding: 15px;"
-        )
-        main_layout.addWidget(title)
+        container = QWidget()
+        self.setCentralWidget(container)
+        host_layout = QVBoxLayout(container)
+        host_layout.setContentsMargins(0, 0, 0, 0)
+        host_layout.setSpacing(0)
 
-        # Step 12: the selected weights are used in all main detection workflows.
-        # Choose best.pt from Step 11 to use your custom underwater classes.
-        model_row = QHBoxLayout()
-        model_row.addWidget(QLabel("Detection model:"))
-        self.model_path_label = QLabel("yolo26n.pt (pretrained)")
+        self.background_label = QLabel(container)
+        self.background_label.setScaledContents(False)
+        self.background_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.background_label.lower()
+
+        root = QWidget(container)
+        root.setObjectName("root")
+        self.content_root = root
+        host_layout.addWidget(root)
+
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(23, 18, 23, 17)
+        layout.setSpacing(16)
+
+        # Brand header — balanced, spacious and deliberately low visual noise.
+        heading = QHBoxLayout()
+        heading.setSpacing(13)
+        # No image in the upper-left corner. Keep the Ocean Studio title only.
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(2)
+        brand = QLabel("OCEAN STUDIO")
+        brand.setObjectName("brandTitle")
+        subtitle = QLabel("UNDERWATER VISION AI  /  COMPUTER VISION RESEARCH WORKSPACE")
+        subtitle.setObjectName("subTitle")
+        brand_text.addWidget(brand)
+        brand_text.addWidget(subtitle)
+        heading.addLayout(brand_text)
+        heading.addStretch(1)
+        self.background_button = QPushButton("Set background")
+        self.background_button.setToolTip("Choose a background photo. It will appear softly blurred behind the interface.")
+        self.background_button.clicked.connect(self.choose_background_image)
+        heading.addWidget(self.background_button)
+        header_tag = QLabel("●  RESEARCH EDITION")
+        header_tag.setObjectName("headerTag")
+        heading.addWidget(header_tag)
+        layout.addLayout(heading)
+
+        body = QHBoxLayout()
+        body.setSpacing(16)
+        layout.addLayout(body, 1)
+
+        # Left: controls live in an independent scroll area, preventing clipping
+        # on smaller laptop screens.
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setObjectName("sidebarScroll")
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sidebar_scroll.setFixedWidth(326)
+        sidebar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(0, 0, 7, 0)
+        side.setSpacing(15)
+        sidebar_scroll.setWidget(sidebar)
+        body.addWidget(sidebar_scroll)
+
+        model_card, model_layout = self._make_card("01", "DETECTION MODEL", "Choose the brain behind the boxes")
+        self.model_path_label = QLabel("yolo26n.pt  •  pretrained")
+        self.model_path_label.setObjectName("modelName")
         self.model_path_label.setToolTip("Currently selected YOLO weights")
         self.model_path_label.setWordWrap(True)
-        model_row.addWidget(self.model_path_label, 1)
-        self.choose_model_button = QPushButton("Step 12: Choose best.pt")
+        model_layout.addWidget(self.model_path_label)
+        self.choose_model_button = QPushButton("Load my best.pt")
+        self.choose_model_button.setObjectName("accentButton")
         self.choose_model_button.clicked.connect(self.choose_detection_model)
-        model_row.addWidget(self.choose_model_button)
-        self.reset_model_button = QPushButton("Use Pretrained YOLO")
+        model_layout.addWidget(self.choose_model_button)
+        self.reset_model_button = QPushButton("Use pretrained YOLO")
         self.reset_model_button.clicked.connect(self.reset_detection_model)
-        model_row.addWidget(self.reset_model_button)
-        main_layout.addLayout(model_row)
-
-        diagnostic_row = QHBoxLayout()
-        self.model_classes_label = QLabel("Model classes: load a model to inspect")
+        model_layout.addWidget(self.reset_model_button)
+        self.model_classes_label = QLabel("Classes appear here when a model is loaded")
+        self.model_classes_label.setObjectName("hintText")
         self.model_classes_label.setWordWrap(True)
-        diagnostic_row.addWidget(self.model_classes_label, 1)
-        self.test_detection_button = QPushButton("Test Detection (low confidence)")
+        self.model_classes_label.setMaximumHeight(67)
+        model_layout.addWidget(self.model_classes_label)
+        self.test_detection_button = QPushButton("Test detection  ·  low confidence")
         self.test_detection_button.setToolTip(
-            "Run the selected model on the original image at confidence 0.05 "
-            "to diagnose missing detections. This is not an accuracy evaluation."
+            "Diagnostic: run the selected model on the original image with confidence 0.05."
         )
         self.test_detection_button.clicked.connect(self.test_detection)
-        diagnostic_row.addWidget(self.test_detection_button)
-        main_layout.addLayout(diagnostic_row)
+        model_layout.addWidget(self.test_detection_button)
+        side.addWidget(model_card)
 
-        # Step 18: two compact toolbars keep the main workflow visible.
-        controls = QHBoxLayout()
-        controls.setSpacing(7)
-        self.open_button = QPushButton("Open Image")
-        self.open_button.clicked.connect(self.open_image)
-        controls.addWidget(self.open_button)
-
+        enhance_card, enhance_layout = self._make_card("02", "IMAGE ENHANCEMENT", "Tune underwater colors and contrast")
+        method_title = QLabel("ENHANCEMENT METHOD")
+        method_title.setObjectName("fieldLabel")
+        enhance_layout.addWidget(method_title)
         self.enhancement_choice = QComboBox()
         self.enhancement_choice.addItems(list(METHOD_SETTINGS.keys()))
         self.enhancement_choice.currentTextChanged.connect(self.on_method_changed)
-        controls.addWidget(self.enhancement_choice, 1)
-
-        self.enhance_button = QPushButton("Enhance")
-        self.enhance_button.clicked.connect(self.enhance)
-        controls.addWidget(self.enhance_button)
-
-        self.detect_button = QPushButton("Detect Objects")
-        self.detect_button.clicked.connect(self.detect)
-        controls.addWidget(self.detect_button)
-
-        self.save_button = QPushButton("Save Result")
-        self.save_button.clicked.connect(self.save_image)
-        controls.addWidget(self.save_button)
-
-        self.reset_image_button = QPushButton("Reset Image")
-        self.reset_image_button.setToolTip("Restore the original image without changing your model")
-        self.reset_image_button.clicked.connect(self.reset_image)
-        controls.addWidget(self.reset_image_button)
-        main_layout.addLayout(controls)
-
-        self.compare_button = QPushButton("Compare All")
-        self.compare_button.clicked.connect(self.compare_all)
-        self.compare_yolo_button = QPushButton("Compare YOLO")
-        self.compare_yolo_button.clicked.connect(self.compare_detections)
-        self.batch_button = QPushButton("Batch YOLO")
-        self.batch_button.clicked.connect(self.compare_batch)
-        self.report_button = QPushButton("Open Batch Report")
-        self.report_button.clicked.connect(self.open_saved_batch_report)
-
-        self.evaluate_button = QPushButton("Step 9: Evaluate Labeled Dataset")
-        self.evaluate_button.clicked.connect(self.open_ground_truth_evaluation)
-        self.dataset_check_button = QPushButton("Step 10: Check Underwater Dataset")
-        self.dataset_check_button.clicked.connect(self.open_dataset_audit)
-        self.train_button = QPushButton("Step 11: Train Underwater YOLO")
-        self.train_button.clicked.connect(self.open_underwater_training)
-        self.research_train_button = QPushButton("Step 15: Improve Model Training")
-        self.research_train_button.clicked.connect(self.open_research_training)
-
-        self.accuracy_compare_button = QPushButton("Step 13: Compare Enhancement Accuracy")
-        self.accuracy_compare_button.clicked.connect(self.open_enhancement_accuracy)
-        self.accuracy_report_button = QPushButton("Step 14: Open Accuracy Charts / CSV Report")
-        self.accuracy_report_button.clicked.connect(self.open_accuracy_report)
-        self.final_experiment_button = QPushButton("Step 16: Final Controlled Experiment")
-        self.final_experiment_button.clicked.connect(self.open_final_experiment)
-        self.step17_analysis_button = QPushButton("Step 17: Analyze Final Results")
-        self.step17_analysis_button.clicked.connect(self.open_step17_analysis)
-
-        # Each existing feature is still available, but now grouped by purpose.
-        self.tool_tabs = QTabWidget()
-        tab_groups = [
-            ("Explore & Batch", [self.compare_button, self.compare_yolo_button,
-                                  self.batch_button, self.report_button]),
-            ("Dataset & Training", [self.dataset_check_button, self.evaluate_button,
-                                    self.train_button, self.research_train_button]),
-            ("Research & Reports", [self.accuracy_compare_button, self.accuracy_report_button,
-                                    self.final_experiment_button, self.step17_analysis_button]),
-        ]
-        for tab_name, buttons in tab_groups:
-            page = QWidget()
-            grid = QGridLayout(page)
-            grid.setContentsMargins(10, 10, 10, 10)
-            for index, button in enumerate(buttons):
-                grid.addWidget(button, index // 2, index % 2)
-            self.tool_tabs.addTab(page, tab_name)
-        self.tool_tabs.setMaximumHeight(145)
-        main_layout.addWidget(self.tool_tabs)
-
-        # The enhancement slider controls the selected image-processing algorithm.
-        enhancement_controls = QHBoxLayout()
+        enhance_layout.addWidget(self.enhancement_choice)
         self.setting_label = QLabel("CLAHE clip limit: 2.0")
-        self.setting_label.setMinimumWidth(185)
-        enhancement_controls.addWidget(self.setting_label)
-
+        self.setting_label.setObjectName("valueText")
+        enhance_layout.addWidget(self.setting_label)
         self.enhancement_slider = QSlider(Qt.Orientation.Horizontal)
         self.enhancement_slider.valueChanged.connect(self.on_enhancement_value_changed)
-        enhancement_controls.addWidget(self.enhancement_slider)
-
-        self.reset_button = QPushButton("Reset Setting")
+        enhance_layout.addWidget(self.enhancement_slider)
+        self.reset_button = QPushButton("Reset enhancement setting")
         self.reset_button.clicked.connect(self.reset_method_setting)
-        enhancement_controls.addWidget(self.reset_button)
-        main_layout.addLayout(enhancement_controls)
+        enhance_layout.addWidget(self.reset_button)
+        self.enhance_button = QPushButton("Apply enhancement")
+        self.enhance_button.setObjectName("accentButton")
+        self.enhance_button.clicked.connect(self.enhance)
+        enhance_layout.addWidget(self.enhance_button)
+        side.addWidget(enhance_card)
 
-        # Separate confidence slider changes YOLO filtering, not enhancement.
-        confidence_controls = QHBoxLayout()
+        confidence_card, confidence_layout = self._make_card("03", "DETECTION SETTINGS", "Adjust sensitivity before detecting")
         self.confidence_label = QLabel("YOLO confidence: 0.25")
-        self.confidence_label.setMinimumWidth(185)
-        confidence_controls.addWidget(self.confidence_label)
-
+        self.confidence_label.setObjectName("valueText")
+        confidence_layout.addWidget(self.confidence_label)
         self.confidence_slider = QSlider(Qt.Orientation.Horizontal)
         self.confidence_slider.setRange(5, 95)
         self.confidence_slider.setValue(25)
         self.confidence_slider.valueChanged.connect(self.on_confidence_changed)
-        confidence_controls.addWidget(self.confidence_slider)
-        main_layout.addLayout(confidence_controls)
+        confidence_layout.addWidget(self.confidence_slider)
+        confidence_hint = QLabel("Lower values show more possible detections, including false positives.")
+        confidence_hint.setObjectName("hintText")
+        confidence_hint.setWordWrap(True)
+        confidence_layout.addWidget(confidence_hint)
+        side.addWidget(confidence_card)
+        side.addStretch(1)
 
-        left_layout = QVBoxLayout() 
-        right_layout = QVBoxLayout()
-        left_title = QLabel("Original Image")
-        right_title = QLabel("Processed Image / Detection Result")
-        for label in (left_title, right_title):
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Right: large image-first canvas with a restrained action bar.
+        workspace = QVBoxLayout()
+        workspace.setSpacing(13)
+        body.addLayout(workspace, 1)
+        workspace_header = QHBoxLayout()
+        workspace_heading = QVBoxLayout()
+        workspace_heading.setSpacing(2)
+        ws_title = QLabel("Image workspace")
+        ws_title.setObjectName("sectionTitle")
+        ws_desc = QLabel("Explore  /  Enhance  /  Detect  /  Compare")
+        ws_desc.setObjectName("subTitle")
+        workspace_heading.addWidget(ws_title)
+        workspace_heading.addWidget(ws_desc)
+        workspace_header.addLayout(workspace_heading)
+        workspace_header.addStretch()
+        # Independent workspace logo: does NOT reuse the personal logo.
+        # To change this logo, replace assets/workspace_logo.png.
+        self.workspace_logo = QLabel()
+        self.workspace_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.workspace_logo.setFixedSize(200, 86)
+        main_logo = logo_pixmap("workspace_logo.png", 194, 80)
+        if main_logo is not None:
+            self.workspace_logo.setPixmap(main_logo)
+            self.workspace_logo.setToolTip("Workspace logo: assets/workspace_logo.png")
+        else:
+            self.workspace_logo.setText("ADD WORKSPACE LOGO")
+            self.workspace_logo.setObjectName("workspaceLogoText")
+            self.workspace_logo.setToolTip("Place your different logo at assets/workspace_logo.png")
+        workspace_header.addWidget(self.workspace_logo)
+        workspace.addLayout(workspace_header)
 
-        self.original_label = QLabel("No image loaded")
-        self.result_label = QLabel("No result yet")
-        for label in (self.original_label, self.result_label):
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setMinimumSize(240, 230)
-            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
-            label.setStyleSheet(
-                "background: #172b3a; color: white; border: 1px solid #456;"
-            )
+        actions = QFrame()
+        actions.setObjectName("actionBar")
+        action_layout = QHBoxLayout(actions)
+        action_layout.setContentsMargins(12, 10, 12, 10)
+        action_layout.setSpacing(8)
+        self.open_button = QPushButton("＋  Open image")
+        self.open_button.setObjectName("accentButton")
+        self.open_button.clicked.connect(self.open_image)
+        action_layout.addWidget(self.open_button)
+        self.detect_button = QPushButton("◎  Detect objects")
+        self.detect_button.setObjectName("detectButton")
+        self.detect_button.clicked.connect(self.detect)
+        action_layout.addWidget(self.detect_button)
+        action_layout.addStretch(1)
+        self.reset_image_button = QPushButton("↺  Reset")
+        self.reset_image_button.clicked.connect(self.reset_image)
+        self.reset_image_button.setToolTip("Restore the original image; keep selected model")
+        action_layout.addWidget(self.reset_image_button)
+        self.save_button = QPushButton("↓  Save result")
+        self.save_button.clicked.connect(self.save_image)
+        action_layout.addWidget(self.save_button)
+        workspace.addWidget(actions)
 
-        left_layout.addWidget(left_title)
-        left_layout.addWidget(self.original_label)
-        right_layout.addWidget(right_title)
-        right_layout.addWidget(self.result_label)
-        before_panel = QWidget()
-        before_panel.setLayout(left_layout)
-        after_panel = QWidget()
-        after_panel.setLayout(right_layout)
+        self.original_label = QLabel("OPEN AN IMAGE TO BEGIN")
+        self.result_label = QLabel("YOUR RESULT WILL APPEAR HERE")
         self.image_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.image_splitter.addWidget(before_panel)
-        self.image_splitter.addWidget(after_panel)
+        self.image_splitter.setObjectName("imageSplitter")
+        for label, title, caption in (
+            (self.original_label, "SOURCE IMAGE", "Unmodified reference"),
+            (self.result_label, "PROCESSED / AI RESULT", "Enhancement and predictions"),
+        ):
+            container = QFrame()
+            container.setObjectName("imageCard")
+            container_layout = QVBoxLayout(container)
+            container_layout.setContentsMargins(13, 13, 13, 13)
+            container_layout.setSpacing(9)
+            title_row = QHBoxLayout()
+            title_label = QLabel(title)
+            title_label.setObjectName("imageCardTitle")
+            hint_label = QLabel(caption)
+            hint_label.setObjectName("imageCardHint")
+            title_row.addWidget(title_label)
+            title_row.addStretch()
+            title_row.addWidget(hint_label)
+            container_layout.addLayout(title_row)
+            label.setObjectName("imageCanvas")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setMinimumSize(140, 210)
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+            label.setWordWrap(True)
+            label.installEventFilter(self)
+            container_layout.addWidget(label, 1)
+            self.image_splitter.addWidget(container)
+        self.image_splitter.setChildrenCollapsible(False)
         self.image_splitter.setStretchFactor(0, 1)
         self.image_splitter.setStretchFactor(1, 1)
-        main_layout.addWidget(self.image_splitter, 1)
+        workspace.addWidget(self.image_splitter, 1)
 
-        self.status = QLabel("Ready. Choose an image to begin.")
+        # All twelve existing research actions stay available. The tabs expose
+        # them by task rather than by the step number where they were introduced.
+        self.compare_button = QPushButton("Compare enhancements")
+        self.compare_button.clicked.connect(self.compare_all)
+        self.compare_yolo_button = QPushButton("Compare YOLO detections")
+        self.compare_yolo_button.clicked.connect(self.compare_detections)
+        self.batch_button = QPushButton("Batch YOLO analysis")
+        self.batch_button.clicked.connect(self.compare_batch)
+        self.report_button = QPushButton("Open batch report")
+        self.report_button.clicked.connect(self.open_saved_batch_report)
+        self.dataset_check_button = QPushButton("Check underwater dataset")
+        self.dataset_check_button.clicked.connect(self.open_dataset_audit)
+        self.evaluate_button = QPushButton("Evaluate labeled dataset")
+        self.evaluate_button.clicked.connect(self.open_ground_truth_evaluation)
+        self.train_button = QPushButton("Train underwater YOLO")
+        self.train_button.clicked.connect(self.open_underwater_training)
+        self.research_train_button = QPushButton("Improve model training")
+        self.research_train_button.clicked.connect(self.open_research_training)
+        self.accuracy_compare_button = QPushButton("Compare enhancement accuracy")
+        self.accuracy_compare_button.clicked.connect(self.open_enhancement_accuracy)
+        self.accuracy_report_button = QPushButton("Open accuracy graphs / CSV")
+        self.accuracy_report_button.clicked.connect(self.open_accuracy_report)
+        self.final_experiment_button = QPushButton("Final controlled experiment")
+        self.final_experiment_button.clicked.connect(self.open_final_experiment)
+        self.step17_analysis_button = QPushButton("Analyze final results")
+        self.step17_analysis_button.clicked.connect(self.open_step17_analysis)
+
+        research_heading = QHBoxLayout()
+        research_label = QLabel("RESEARCH LAB")
+        research_label.setObjectName("fieldLabel")
+        research_heading.addWidget(research_label)
+        research_heading.addStretch(1)
+        research_subtitle = QLabel("12 connected tools  ·  All prior steps preserved")
+        research_subtitle.setObjectName("hintText")
+        research_heading.addWidget(research_subtitle)
+        workspace.addLayout(research_heading)
+        self.tool_tabs = QTabWidget()
+        self.tool_tabs.setObjectName("researchTabs")
+        groups = [
+            ("Explore & batch", [self.compare_button, self.compare_yolo_button,
+                                 self.batch_button, self.report_button]),
+            ("Dataset & training", [self.dataset_check_button, self.evaluate_button,
+                                    self.train_button, self.research_train_button]),
+            ("Research & reports", [self.accuracy_compare_button, self.accuracy_report_button,
+                                    self.final_experiment_button, self.step17_analysis_button]),
+        ]
+        for tab_name, buttons in groups:
+            page = QWidget()
+            page.setObjectName("researchPage")
+            grid = QGridLayout(page)
+            grid.setContentsMargins(14, 13, 14, 13)
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(9)
+            for index, button in enumerate(buttons):
+                button.setMinimumHeight(39)
+                grid.addWidget(button, index // 2, index % 2)
+            self.tool_tabs.addTab(page, tab_name)
+        # A discreet fourth tab for thesis author and university branding.
+        self.tool_tabs.addTab(self.create_about_tab(), "About  ·  i")
+        self.tool_tabs.setMinimumHeight(151)
+        self.tool_tabs.setMaximumHeight(190)
+        self.tool_tabs.currentChanged.connect(self.update_research_tab_height)
+        workspace.addWidget(self.tool_tabs)
+
+        footer = QFrame()
+        footer.setObjectName("footer")
+        footer_row = QHBoxLayout(footer)
+        footer_row.setContentsMargins(12, 9, 12, 9)
+        self.status_indicator = QLabel("●")
+        self.status_indicator.setObjectName("statusLight")
+        footer_row.addWidget(self.status_indicator)
+        self.status = QLabel("Ready. Open an underwater image to begin.")
+        self.status.setObjectName("statusText")
         self.status.setWordWrap(True)
-        main_layout.addWidget(self.status)
-        help_button = QPushButton("Quick Start / Shortcuts")
+        footer_row.addWidget(self.status, 1)
+        help_button = QPushButton("?  Quick start")
         help_button.clicked.connect(self.show_quick_start)
-        help_button.setMaximumWidth(220)
-        main_layout.addWidget(help_button)
+        footer_row.addWidget(help_button)
+        workspace.addWidget(footer)
+
+        self._image_pixmaps = {}
         self.on_method_changed(self.enhancement_choice.currentText())
+
+    def update_research_tab_height(self, index):
+        """Reserve enough room for About without crowding normal research tabs."""
+        if self.tool_tabs.tabText(index).startswith("About"):
+            self.tool_tabs.setMinimumHeight(270)
+            self.tool_tabs.setMaximumHeight(300)
+        else:
+            self.tool_tabs.setMinimumHeight(151)
+            self.tool_tabs.setMaximumHeight(190)
+
+    def create_about_tab(self):
+        """Compact, legible author/contact details and two dedicated logo cards."""
+        profile = load_profile()
+        page = QWidget()
+        page.setObjectName("researchPage")
+        outer = QHBoxLayout(page)
+        outer.setContentsMargins(18, 14, 18, 14)
+        outer.setSpacing(20)
+
+        info_card = QFrame()
+        info_card.setObjectName("aboutInfoCard")
+        info_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        info_layout = QVBoxLayout(info_card)
+        info_layout.setContentsMargins(16, 10, 16, 10)
+        info_layout.setSpacing(5)
+        heading = QLabel("ABOUT THE DEVELOPER")
+        heading.setObjectName("aboutSectionLabel")
+        info_layout.addWidget(heading)
+
+        fields = (
+            ("FIRST NAME", profile["first_name"]),
+            ("SURNAME", profile["last_name"]),
+            ("EMAIL", profile["email"] or "Not provided yet"),
+            ("FACULTY NUMBER", profile["fnumber"] or "Not provided yet"),
+        )
+        field_grid = QGridLayout()
+        field_grid.setContentsMargins(0, 2, 0, 0)
+        field_grid.setHorizontalSpacing(16)
+        field_grid.setVerticalSpacing(8)
+        for i, (title, value) in enumerate(fields):
+            group = QWidget()
+            group_layout = QVBoxLayout(group)
+            group_layout.setContentsMargins(0, 0, 0, 0)
+            group_layout.setSpacing(2)
+            caption = QLabel(title)
+            caption.setObjectName("aboutSectionLabel")
+            answer = QLabel(value)
+            answer.setObjectName("aboutValue")
+            answer.setWordWrap(True)
+            answer.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            group_layout.addWidget(caption)
+            group_layout.addWidget(answer)
+            field_grid.addWidget(group, i // 2, i % 2)
+        info_layout.addLayout(field_grid)
+        footer = QLabel(f"{profile['program']}  ·  {profile['university']}")
+        footer.setObjectName("aboutFooter")
+        footer.setWordWrap(True)
+        info_layout.addWidget(footer)
+        info_layout.addStretch(1)
+        outer.addWidget(info_card, 3)
+
+        logo_wrap = QWidget()
+        logo_layout = QHBoxLayout(logo_wrap)
+        logo_layout.setContentsMargins(0, 0, 0, 0)
+        logo_layout.setSpacing(12)
+        for filename, title in (("logo.png", "MY LOGO"),
+                                ("university_logo.png", "UNIVERSITY LOGO")):
+            card = QFrame()
+            card.setObjectName("aboutLogoCard")
+            card.setMinimumWidth(144)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 10, 12, 10)
+            card_layout.setSpacing(8)
+            picture = QLabel()
+            picture.setObjectName("aboutLogo")
+            picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            picture.setMinimumSize(116, 120)
+            picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            pixmap = logo_pixmap(filename, 132, 115)
+            if pixmap is not None:
+                picture.setPixmap(pixmap)
+            else:
+                picture.setText("Add logo image\nto assets folder")
+                picture.setToolTip(f"Place your image at assets/{filename}")
+            label = QLabel(title)
+            label.setObjectName("aboutSectionLabel")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            card_layout.addWidget(picture, 1)
+            card_layout.addWidget(label)
+            logo_layout.addWidget(card)
+        outer.addWidget(logo_wrap, 2)
+        return page
+
+    def _make_card(self, number, heading, hint):
+        """Reusable, lightweight side card (no new package dependencies)."""
+        card = QFrame()
+        card.setObjectName("controlCard")
+        column = QVBoxLayout(card)
+        column.setContentsMargins(16, 15, 16, 15)
+        column.setSpacing(10)
+        row = QHBoxLayout()
+        index = QLabel(number)
+        index.setObjectName("cardIndex")
+        row.addWidget(index)
+        label = QLabel(heading)
+        label.setObjectName("cardHeading")
+        row.addWidget(label)
+        row.addStretch()
+        column.addLayout(row)
+        subtitle = QLabel(hint)
+        subtitle.setObjectName("hintText")
+        subtitle.setWordWrap(True)
+        column.addWidget(subtitle)
+        return card, column
+
+    def eventFilter(self, obj, event):
+        """Re-scale the stored full-resolution preview when panels are resized."""
+        if event.type() == QEvent.Type.Resize and obj in (self.original_label, self.result_label):
+            self._update_preview(obj)
+        return super().eventFilter(obj, event)
+
+    def _update_preview(self, label):
+        cache = getattr(self, "_image_pixmaps", None)
+        if not cache:
+            return
+        pixmap = cache.get(label)
+        if pixmap is None or pixmap.isNull():
+            return
+        available = label.contentsRect().size()
+        if available.width() < 2 or available.height() < 2:
+            return
+        label.setPixmap(pixmap.scaled(
+            available,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
+
+    def refresh_background(self):
+        """Redraw the optional blurred background to match the current window size."""
+        if not hasattr(self, "background_label") or self.background_label is None:
+            return
+        central = self.centralWidget()
+        if central is None:
+            return
+        self.background_label.setGeometry(0, 0, central.width(), central.height())
+        pixmap = build_blurred_background_pixmap(central.width(), central.height())
+        if pixmap is None:
+            self.background_label.clear()
+            self.background_label.hide()
+        else:
+            self.background_label.setPixmap(pixmap)
+            self.background_label.show()
+            self.background_label.lower()
+        if hasattr(self, "content_root"):
+            self.content_root.raise_()
+
+    def choose_background_image(self):
+        """Allow the user to choose a background photo without editing code."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose background image",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp)"
+        )
+        if not path:
+            return
+        try:
+            ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+            for old_name in ("background_custom.png", "background_custom.jpg", "background_custom.jpeg", "background_custom.webp"):
+                old_file = ASSETS_DIR / old_name
+                if old_file.exists():
+                    old_file.unlink()
+            suffix = Path(path).suffix.lower() or ".png"
+            target = ASSETS_DIR / f"background_custom{suffix}"
+            shutil.copyfile(path, target)
+            self.refresh_background()
+            self.status.setText("Custom background updated. The image is shown with a soft blur.")
+        except Exception as error:
+            QMessageBox.critical(self, "Background image error", str(error))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.refresh_background()
 
     def configure_shortcuts(self):
         """Small, memorable keyboard shortcuts for a live demonstration."""
@@ -3476,7 +3979,8 @@ class UnderwaterApp(QMainWindow):
             "2. Choose an enhancement and click Enhance.\n"
             "3. Choose your best.pt weights (optional).\n"
             "4. Click Detect Objects or Compare YOLO.\n"
-            "5. Use the tabs for dataset, training, experiments and reports.\n\n"
+            "5. Use Set background if you want a blurred photo behind the interface.\n"
+            "6. Use the tabs for dataset, training, experiments and reports.\n\n"
             "Shortcuts: Ctrl+O = Open | Ctrl+D = Detect | "
             "Ctrl+S = Save | Ctrl+R = Reset Image.\n\n"
             "For thesis results, use labeled test data and report mAP, "
@@ -3502,14 +4006,15 @@ class UnderwaterApp(QMainWindow):
             if self.processed is not None:
                 self.show_image(self.processed, self.result_label)
             title = Path(weights).name
-            self.model_path_label.setText(title + (" (pretrained)" if weights == "yolo26n.pt" else " (custom)"))
+            self.model_path_label.setText(title + ("  •  pretrained" if weights == "yolo26n.pt" else "  •  custom"))
             self.model_path_label.setToolTip(weights)
             names = getattr(candidate, "names", {})
             if isinstance(names, dict):
                 class_labels = ", ".join(str(value) for value in names.values())
             else:
                 class_labels = ", ".join(map(str, names))
-            self.model_classes_label.setText("Model classes: " + (class_labels or "unknown"))
+            self.model_classes_label.setText("Classes: " + (class_labels or "unknown"))
+            self.model_classes_label.setToolTip(class_labels or "unknown")
             if weights != "yolo26n.pt":
                 self.confidence_slider.setValue(10)
             self.status.setText(f"Ready with {title}. Click Detect Objects or Compare YOLO.")
@@ -3606,23 +4111,17 @@ class UnderwaterApp(QMainWindow):
         self.status.setText("Confidence changed. Click Detect Objects to apply it.")
 
     def show_image(self, image, label):
+        """Preserve source-resolution pixmaps instead of repeatedly scaling them."""
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         height, width, channels = rgb.shape
         qimage = QImage(
-            rgb.data,
-            width,
-            height,
-            width * channels,
+            rgb.data, width, height, width * channels,
             QImage.Format.Format_RGB888,
         ).copy()
-        pixmap = QPixmap.fromImage(qimage)
-        label.setPixmap(
-            pixmap.scaled(
-                label.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
+        if not hasattr(self, "_image_pixmaps"):
+            self._image_pixmaps = {}
+        self._image_pixmaps[label] = QPixmap.fromImage(qimage)
+        self._update_preview(label)
 
     def open_image(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -3744,7 +4243,8 @@ class UnderwaterApp(QMainWindow):
                 self.model = YOLO(self.model_weights)
                 names = getattr(self.model, "names", {})
                 class_labels = ", ".join(str(v) for v in names.values()) if isinstance(names, dict) else ", ".join(map(str, names))
-                self.model_classes_label.setText("Model classes: " + (class_labels or "unknown"))
+                self.model_classes_label.setText("Classes: " + (class_labels or "unknown"))
+                self.model_classes_label.setToolTip(class_labels or "unknown")
             self.status.setText("Running detection...")
             QApplication.processEvents()
             results = self.model.predict(source=image, conf=confidence, verbose=False)
@@ -3817,7 +4317,17 @@ class UnderwaterApp(QMainWindow):
 
 
 if __name__ == "__main__":
+    # Give the app its own Windows taskbar identity instead of Python's default.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "OceanStudio.UnderwaterVisionAI.Research"
+            )
+        except Exception:
+            pass
     app = QApplication(sys.argv)
+    set_ocean_app_icon(app)
     window = UnderwaterApp()
     window.show()
     sys.exit(app.exec())
