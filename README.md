@@ -465,11 +465,11 @@ The source code currently reads `first_name`, `last_name`, `email`, `fnum`, `uni
 
 ```json
 {
-  "first_name": "Your first name",
-  "last_name": "Your surname",
-  "email": "",
-  "fnum": "",
-  "university": "Your university",
+  "first_name": "Grigorios",
+  "last_name": "Makris",
+  "email": "gmakris@tu-sofia.bg",
+  "fnum": "423325012",
+  "university": "Technical University Of Sofia",
   "program": "Master's thesis",
   "project_title": "Underwater Vision AI"
 }
@@ -588,9 +588,8 @@ If you use or extend Ocean Studio in academic work, cite this repository and inc
 @misc{jrbmods_underwater_vision,
   author       = {{jrbMods}},
   title        = {Ocean Studio: Underwater Vision AI},
-  howpublished = {GitHub repository},
   url          = {https://github.com/jrbMods/underwater-vision},
-  note         = {Accessed 2026-11-12; cite the specific commit used}
+  note         = {Accessed 2026-11-12}
 }
 ```
 
