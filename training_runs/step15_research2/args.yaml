@@ -13,7 +13,7 @@ cache: false
 device: cpu
 workers: 0
 project: C:\Users\Jerry\Documents\GitHub\underwater-vision\training_runs
-name: step15_research
+name: step15_research2
 exist_ok: false
 pretrained: true
 optimizer: auto
@@ -106,4 +106,4 @@ auto_augment: randaugment
 erasing: 0.4
 cfg: null
 tracker: botsort.yaml
-save_dir: C:\Users\Jerry\Documents\GitHub\underwater-vision\training_runs\step15_research
+save_dir: C:\Users\Jerry\Documents\GitHub\underwater-vision\training_runs\step15_research2

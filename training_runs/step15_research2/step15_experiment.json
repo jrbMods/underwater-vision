@@ -1,0 +1,33 @@
+{
+  "step": 15,
+  "purpose": "Validation-based model training, never test-set tuning",
+  "dataset_yaml": "C:\\Users\\Jerry\\Documents\\GitHub\\underwater-vision\\data.yaml",
+  "dataset_image_counts": {
+    "train": 448,
+    "val": 127
+  },
+  "class_names": {
+    "0": "fish",
+    "1": "jellyfish",
+    "2": "penguin",
+    "3": "puffin",
+    "4": "shark",
+    "5": "starfish",
+    "6": "stingray"
+  },
+  "starting_weights": "yolo26n.pt",
+  "epochs_requested": 50,
+  "epochs_completed": 50,
+  "early_stopping_patience": 12,
+  "batch_size": 4,
+  "image_size": 640,
+  "seed": 42,
+  "deterministic_requested": true,
+  "device_selection": "Automatic",
+  "ultralytics_version": "8.4.8",
+  "torch_version": "2.9.1+cpu",
+  "cuda_available": false,
+  "best_checkpoint": "C:\\Users\\Jerry\\Documents\\GitHub\\underwater-vision\\training_runs\\step15_research2\\weights\\best.pt",
+  "training_results_csv": "C:\\Users\\Jerry\\Documents\\GitHub\\underwater-vision\\training_runs\\step15_research2\\results.csv",
+  "note": "GPU algorithms may still be nondeterministic; test split not used here."
+}
