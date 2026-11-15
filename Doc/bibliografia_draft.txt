@@ -1,0 +1,25 @@
+[1] Akkaynak, D., & Treibitz, T. (2018). “A Revised Underwater Image Formation Model.” Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pp. 6723–6732. https://doi.org/10.1109/CVPR.2018.00703
+
+[2] Ancuti, C. O., Ancuti, C., De Vleeschouwer, C., & Bekaert, P. (2018). “Color Balance and Fusion for Underwater Image Enhancement.” IEEE Transactions on Image Processing, 27(1), pp. 379–393. https://doi.org/10.1109/TIP.2017.2759252
+
+[3] Awad, A., et al. (2026). “Revisiting Underwater Image Enhancement for Object Detection: A Unified Quality–Detection Evaluation Framework.” Journal of Imaging, 12(1), Article 18. https://doi.org/10.3390/jimaging12010018
+
+[4] Schettini, R., & Corchs, S. (2010). “Underwater Image Processing: State of the Art of Restoration and Image Enhancement Methods.” EURASIP Journal on Advances in Signal Processing, 2010, Article 746052. DOI.
+
+[5] Gonzalez, R. C., & Woods, R. E. (2018). Digital Image Processing, 4th ed. Pearson.
+
+[6] Szeliski, R. (2022). Computer Vision: Algorithms and Applications, 2nd ed. Springer.
+
+[7] OpenCV. Color Space Conversions. OpenCV Documentation.
+
+[8] Jaffe, J. S. (1990). “Computer Modeling and the Design of Optimal Underwater Imaging Systems.” IEEE Journal of Oceanic Engineering, 15(2), pp. 101–111. DOI.
+
+[9] OpenCV. “Histogram Equalization.” OpenCV Documentation.
+
+[10] Zuiderveld, K. (1994). “Contrast Limited Adaptive Histogram Equalization.” In P. S. Heckbert (Ed.), Graphics Gems IV, Morgan Kaufmann, pp. 474–485.
+
+[11] OpenCV. “Histograms – 2: Histogram Equalization.” OpenCV Documentation, section on Contrast Limited Adaptive Histogram Equalization.
+
+[12] Goodfellow, I., Bengio, Y., & Courville, A. (2016). Deep Learning. MIT Press.
+
+[13] LeCun, Y., Bengio, Y., & Hinton, G. (2015). “Deep Learning.” Nature, 521, pp. 436–444.
