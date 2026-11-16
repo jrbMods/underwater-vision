@@ -23,3 +23,31 @@
 [12] Goodfellow, I., Bengio, Y., & Courville, A. (2016). Deep Learning. MIT Press.
 
 [13] LeCun, Y., Bengio, Y., & Hinton, G. (2015). “Deep Learning.” Nature, 521, pp. 436–444.
+
+[14] Ren, S., He, K., Girshick, R., & Sun, J. (2015). “Faster R-CNN: Towards Real-Time Object Detection with Region Proposal Networks.” Advances in Neural Information Processing Systems, 28, pp. 91–99.
+
+[15] Ultralytics. YOLO Architecture Explained. Official Ultralytics Documentation.
+
+[16] Ultralytics. Ultralytics YOLO26. Official Ultralytics Documentation.
+
+[17] Pedersen, M., Haurum, J. B., Gade, R., & Moeslund, T. B. (2019). “Detection of Marine Animals in a New Underwater Dataset with Varying Visibility.” Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW), pp. 18–26.
+
+[18] Liu, Z., Wang, B., Li, Y., He, J., & Li, Y. (2024). “UnitModule: A Lightweight Joint Image Enhancement Module for Underwater Object Detection.” Pattern Recognition, 151, Article 110435.
+
+[19] Folkman, L., Pitt, K. A., & Stantic, B. (2025). “A Data-Centric Framework for Combating Domain Shift in Underwater Object Detection with Image Enhancement.” Applied Intelligence, 55, Article 272.
+
+[20] Viola, P., & Jones, M. J. (2004). “Robust Real-Time Face Detection.” International Journal of Computer Vision, 57(2), pp. 137–154. DOI
+
+[21] Python Software Foundation. Python Documentation.
+
+[22] OpenCV. OpenCV-Python Tutorials. 
+
+[23] NumPy Developers. NumPy Documentation.
+
+[24] The Qt Company. Qt for Python (PySide6)
+
+[25] Ultralytics. YOLO Python Usage.
+
+[26] Roboflow. Aquarium Combined Dataset, Version 2. Roboflow Universe.
+
+[27] Ultralytics. YOLO Performance Metrics: Performance Metrics Deep Dive.
