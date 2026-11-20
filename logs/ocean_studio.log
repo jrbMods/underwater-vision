@@ -245,3 +245,8 @@ Ocean Studio started. Live application log: C:\Users\Jerry\Documents\GitHub\unde
 ====================================================================
 Ocean Studio started. Live application log: C:\Users\Gregory\Documents\GitHub\underwater-vision\logs\ocean_studio.log
 ====================================================================
+
+====================================================================
+Ocean Studio started. Live application log: C:\Users\Gregory\Documents\GitHub\underwater-vision\logs\ocean_studio.log
+====================================================================
+[Qt QtWarningMsg] QWindowsNativeFileDialogBase::shellItem : Unhandled scheme:  "data"
